@@ -1,0 +1,44 @@
+#install DNS
+yum install dnsmasq -y
+
+cat > /etc/resolv.dnsmasq.conf <<EOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+EOF
+
+#DNS Definitions done
+cat > /etc/dnsmasq.d/lab.com <<EOF
+resolv-file=/etc/resolv.dnsmasq.conf
+domain=lab.com
+log-queries
+address=/openshift-internal.lab.com/10.57.165.65 ###(LB server)
+address=/openshift-cluster.lab.com/10.57.165.65  ###(LB server)
+address=/apps.lab.com/10.57.165.65               ###(LB server)
+EOF
+
+#ADD computers name on hosts
+echo "10.57.165.60  labocms01 labocms01.lab.com" | tee --append /etc/hosts
+echo "10.57.165.61  labocms02 labocms02.lab.com" | tee --append /etc/hosts
+echo "10.57.165.68  labocms03 labocms03.lab.com" | tee --append /etc/hosts
+echo "10.57.165.62  labocnd01 labocnd01.lab.com" | tee --append /etc/hosts
+echo "10.57.165.63  labocnd02 labocnd02.lab.com" | tee --append /etc/hosts
+echo "10.57.165.64  labocnd03 labocnd03.lab.com" | tee --append /etc/hosts
+echo "10.57.165.65  laboclb01 laboclb01.lab.com" | tee --append /etc/hosts
+echo "10.57.165.66  labocdns01 labocdns01.lab.com" | tee --append /etc/hosts
+
+#instal utility
+yum install bind-utils -y
+
+#enable na start service
+systemctl enable dnsmasq && systemctl start dnsmasq
+
+
+#DNS server information is added to the first line of resolv.conf (for all server)
+vi /etc/resolv.conf
+nameserver 10.57.165.66(dns server)
+
+#check dns server work
+dig LABOCMS01.lab.com
+dig google.com
+
