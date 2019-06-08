@@ -1,0 +1,46 @@
+[OSEv3:children]
+masters
+nodes
+etcd
+glusterfs
+
+[masters]
+ocms01.lab.com
+[etcd]
+ocms01.lab.com
+[nodes]
+ocms01.lab.com openshift_node_group_name='node-config-master'
+ocnd01.lab.com openshift_node_group_name='node-config-compute'
+ocnd02.lab.com openshift_node_group_name='node-config-compute'
+ocnd03.lab.com openshift_node_group_name='node-config-infra'
+[glusterfs]
+ocnd01.lab.com glusterfs_devices='["/dev/sdb"]'
+ocnd02.lab.com glusterfs_devices='["/dev/sdb"]'
+ocnd03.lab.com glusterfs_devices='["/dev/sdb"]'
+
+[OSEv3:vars]
+debug_level=4
+ansible_ssh_user=root
+openshift_metrics_install_metrics=true
+
+containerized=True
+openshift_disable_check=disk_availability,docker_storage,memory_availability,docker_image_availability
+
+deployment_type=origin
+openshift_deployment_type=origin
+
+openshift_release="v3.11.0"
+osm_use_cockpit=true
+
+#openshift_master_identity_providers=[{'name': 'htpasswd_auth', 'login': 'true', 'challenge': 'true', 'kind': 'HTPasswdPasswordIdentityProvider', 'filename': '/etc/origin/master/htpasswd'}]
+
+openshift_public_hostname=ocms01.lab.com
+openshift_master_default_subdomain=apps.lab.com
+
+openshift_storage_glusterfs_namespace=app-storage
+openshift_storage_glusterfs_storageclass=true
+openshift_storage_glusterfs_storageclass_default=false
+openshift_storage_glusterfs_block_deploy=true
+openshift_storage_glusterfs_block_host_vol_size=100
+openshift_storage_glusterfs_block_storageclass=true
+openshift_storage_glusterfs_block_storageclass_default=false
