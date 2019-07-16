@@ -199,3 +199,7 @@ if the process is stuck "**wait for control plane for pods to become ready**" ->
 **#check its work!**
 
     oc get nodes
+    
+**#Check Docker registery not emptydir!**
+
+oc get dc docker-registry -n default --export -o yaml | grep registry-storage -B 2
