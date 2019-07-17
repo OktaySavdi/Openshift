@@ -248,4 +248,8 @@ objects:
       apiVersion: apps/v1
       kind: StatefulSet
       name: ${CLUSTER_NAME}
-    targetCPUUtilizationPercentage: 60
+    metrics:
+    - type: Resource
+      resource:
+       name: cpu
+       targetAverageUtilization: 50
