@@ -1,0 +1,510 @@
+kind: "Template"
+apiVersion: "v1"
+metadata:
+  name: redis-ha
+  annotations:
+    description: "Redis in-memory data structure store, high available with persistent storage. For more information about using this template, including OpenShift considerations, see https://github.com/sclorg/redis-container/blob/master/3.2.\n\nNOTE: You must have persistent volumes available in your cluster to use this template."
+    openshift.io/display-name: "Redis HA"
+    openshift.io/documentation-url: "https://github.com/sclorg/redis-container/tree/master/3.2"
+    openshift.io/long-description: "This template provides a standalone Redis server.  The data is stored on persistent storage."
+    openshift.io/provider-display-name: Enterprisecoding
+    openshift.io/support-url: https://www.enterprisecoding.com
+    iconClass: icon-redis
+    tags: "redis"
+labels:
+  template: redis-ha-template
+objects:
+#redis-auth-secret
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: ${DATABASE_SERVICE_NAME}
+      labels:
+        app: ${DATABASE_SERVICE_NAME}
+    type: Opaque
+    data:
+      auth: ${REDIS_PASSWORD}
+#redis-ha-configmap
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: ${DATABASE_SERVICE_NAME}-configmap
+      labels:
+        app: ${DATABASE_SERVICE_NAME}
+    data:
+      redis.conf: |
+        dir "/data"
+        maxmemory 0
+        maxmemory-policy volatile-lru
+        min-slaves-max-lag 5
+        min-slaves-to-write 1
+        rdbchecksum yes
+        rdbcompression yes
+        repl-diskless-sync yes
+        save 900 1
+        requirepass replace-default-auth
+        masterauth replace-default-auth
+    
+      sentinel.conf: |
+        dir "/data"
+        sentinel down-after-milliseconds ${MASTER_GROUPNAME} 10000
+        sentinel failover-timeout ${MASTER_GROUPNAME} 180000
+        sentinel parallel-syncs ${MASTER_GROUPNAME} 5
+        sentinel auth-pass ${MASTER_GROUPNAME} replace-default-auth
+    
+      init.sh: |
+        HOSTNAME="$(hostname)"
+        INDEX="${HOSTNAME##*-}"
+        MASTER="$(redis-cli -h ${DATABASE_SERVICE_NAME} -p 26379 sentinel get-master-addr-by-name ${MASTER_GROUPNAME} | grep -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}')"
+        MASTER_GROUP="${MASTER_GROUPNAME}"
+        QUORUM="2"
+        REDIS_CONF=/data/conf/redis.conf
+        REDIS_PORT=6379
+        SENTINEL_CONF=/data/conf/sentinel.conf
+        SENTINEL_PORT=26379
+        SERVICE=${DATABASE_SERVICE_NAME}
+        set -eu
+    
+        sentinel_update() {
+            echo "Updating sentinel config"
+            eval MY_SENTINEL_ID="\${SENTINEL_ID_$INDEX}"
+            sed -i "1s/^/sentinel myid $MY_SENTINEL_ID\\n/" "$SENTINEL_CONF"
+            sed -i "2s/^/sentinel monitor $MASTER_GROUP $1 $REDIS_PORT $QUORUM \\n/" "$SENTINEL_CONF"
+            echo "sentinel announce-ip $ANNOUNCE_IP" >> $SENTINEL_CONF
+            echo "sentinel announce-port $SENTINEL_PORT" >> $SENTINEL_CONF
+        }
+    
+        redis_update() {
+            echo "Updating redis config"
+            echo "slaveof $1 $REDIS_PORT" >> "$REDIS_CONF"
+            echo "slave-announce-ip $ANNOUNCE_IP" >> $REDIS_CONF
+            echo "slave-announce-port $REDIS_PORT" >> $REDIS_CONF
+        }
+    
+        copy_config() {
+            cp /readonly-config/redis.conf "$REDIS_CONF"
+            cp /readonly-config/sentinel.conf "$SENTINEL_CONF"
+        }
+    
+        setup_defaults() {
+            echo "Setting up defaults"
+            if [ "$INDEX" = "0" ]; then
+                echo "Setting this pod as the default master"
+                redis_update "$ANNOUNCE_IP"
+                sentinel_update "$ANNOUNCE_IP"
+                sed -i "s/^.*slaveof.*//" "$REDIS_CONF"
+            else
+                DEFAULT_MASTER="$(getent hosts "$SERVICE-announce-0" | awk '{ print $1 }')"
+                if [ -z "$DEFAULT_MASTER" ]; then
+                    echo "Unable to resolve host"
+                    exit 1
+                fi
+                echo "Setting default slave config.."
+                redis_update "$DEFAULT_MASTER"
+                sentinel_update "$DEFAULT_MASTER"
+            fi
+        }
+    
+        find_master() {
+            echo "Attempting to find master"
+            if [ "$(redis-cli -h "$MASTER" -a "$AUTH" ping)" != "PONG" ]; then
+               echo "Can't ping master, attempting to force failover"
+               if redis-cli -h "$SERVICE" -p "$SENTINEL_PORT" sentinel failover "$MASTER_GROUP" | grep -q 'NOGOODSLAVE' ; then
+                   setup_defaults
+                   return 0
+               fi
+               sleep 10
+               MASTER="$(redis-cli -h $SERVICE -p $SENTINEL_PORT sentinel get-master-addr-by-name $MASTER_GROUP | grep -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}')"
+               if [ "$MASTER" ]; then
+                   sentinel_update "$MASTER"
+                   redis_update "$MASTER"
+               else
+                  echo "Could not failover, exiting..."
+                  exit 1
+               fi
+            else
+                echo "Found reachable master, updating config"
+                sentinel_update "$MASTER"
+                redis_update "$MASTER"
+            fi
+        }
+    
+        mkdir -p /data/conf/
+    
+        echo "Initializing config.."
+        copy_config
+    
+        ANNOUNCE_IP=$(getent hosts "$SERVICE-announce-$INDEX" | awk '{ print $1 }')
+        if [ -z "$ANNOUNCE_IP" ]; then
+            "Could not resolve the announce ip for this pod"
+            exit 1
+        elif [ "$MASTER" ]; then
+            find_master
+        else
+            setup_defaults
+        fi
+    
+        if [ "${AUTH:-}" ]; then
+            echo "Setting auth values"
+            ESCAPED_AUTH=$(echo "$AUTH" | sed -e 's/[\/&]/\\&/g');
+            sed -i "s/replace-default-auth/${ESCAPED_AUTH}/" "$REDIS_CONF" "$SENTINEL_CONF"
+        fi
+    
+        echo "Ready..."
+#redis-ha-healthchecks
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: ${DATABASE_SERVICE_NAME}-probes
+      labels:
+        app: ${DATABASE_SERVICE_NAME}
+    data:
+      check-quorum.sh: |
+        #!/bin/sh
+        set -eu
+        MASTER_GROUP="${MASTER_GROUPNAME}"
+        SENTINEL_PORT=26379
+        REDIS_PORT=6379
+        NUM_SLAVES=$(redis-cli -p "$SENTINEL_PORT" sentinel master ${MASTER_GROUPNAME} | awk '/num-slaves/{getline; print}')
+        MIN_SLAVES=1
+    
+        if [ "$1" = "$SENTINEL_PORT" ]; then
+            if redis-cli -p "$SENTINEL_PORT" sentinel ckquorum "$MASTER_GROUP" | grep -q NOQUORUM ; then
+                echo "ERROR: NOQUORUM. Sentinel quorum check failed, not enough sentinels found"
+                exit 1
+            fi
+        elif [ "$1" = "$REDIS_PORT" ]; then
+            if [ "$MIN_SLAVES" -gt "$NUM_SLAVES" ]; then
+                echo "Could not find enough replicating slaves. Needed $MIN_SLAVES but found $NUM_SLAVES"
+                exit 1
+            fi
+        fi
+        sh /probes/readiness.sh "$1"
+    
+      readiness.sh: |
+        #!/bin/sh
+        set -eu
+        CHECK_SERVER="$(redis-cli -p "$1" -a "$AUTH" ping)"
+    
+        if [ "$CHECK_SERVER" != "PONG" ]; then
+            echo "Server check failed with: $CHECK_SERVER"
+            exit 1
+        fi
+    
+      liveness.sh: |
+        #!/bin/sh
+        set -eu
+        CHECK_SERVER="$(redis-cli -p "$1" -a "$AUTH" ping)"
+    
+        if [ "$CHECK_SERVER" != "PONG" ] && [ "$CHECK_SERVER" != "LOADING Redis is loading the dataset in memory" ]; then
+            echo "Server check failed with: $CHECK_SERVER"
+            exit 1
+        fi
+#redis-ha-serviceaccount---TODO------------
+  - apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: ${DATABASE_SERVICE_NAME}
+      labels:
+        app: ${DATABASE_SERVICE_NAME}
+#redis-ha-role
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata:
+      name: ${DATABASE_SERVICE_NAME}
+      labels:
+        app: ${DATABASE_SERVICE_NAME}
+    rules:
+    - apiGroups:
+        - ""
+      resources:
+        - endpoints
+      verbs:
+        - get
+#redis-ha-rolebinding
+  - kind: RoleBinding
+    apiVersion: rbac.authorization.k8s.io/v1
+    metadata:
+      name: ${DATABASE_SERVICE_NAME}
+      labels:
+        app: ${DATABASE_SERVICE_NAME}
+    subjects:
+    - kind: ServiceAccount
+      name: ${DATABASE_SERVICE_NAME}
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: Role
+      name: ${DATABASE_SERVICE_NAME}
+#redis-ha-announce-service
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: ${DATABASE_SERVICE_NAME}-announce-1
+      labels:
+        app: ${DATABASE_SERVICE_NAME}
+      annotations:
+        service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
+    spec:
+      publishNotReadyAddresses: true
+      type: ClusterIP
+      ports:
+      - name: server
+        port: 6379
+        protocol: TCP
+        targetPort: redis
+      - name: sentinel
+        port: 26379
+        protocol: TCP
+        targetPort: sentinel
+      selector:
+        app: ${DATABASE_SERVICE_NAME}
+        "statefulset.kubernetes.io/pod-name": ${DATABASE_SERVICE_NAME}-server-1
+#redis-ha-announce-service
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: ${DATABASE_SERVICE_NAME}-announce-0
+      labels:
+        app: ${DATABASE_SERVICE_NAME}
+      annotations:
+        service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
+    spec:
+      publishNotReadyAddresses: true
+      type: ClusterIP
+      ports:
+      - name: server
+        port: 6379
+        protocol: TCP
+        targetPort: redis
+      - name: sentinel
+        port: 26379
+        protocol: TCP
+        targetPort: sentinel
+      selector:
+        app: ${DATABASE_SERVICE_NAME}
+        "statefulset.kubernetes.io/pod-name": ${DATABASE_SERVICE_NAME}-server-0
+#redis-ha-announce-service
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: ${DATABASE_SERVICE_NAME}-announce-2
+      labels:
+        app: ${DATABASE_SERVICE_NAME}
+      annotations:
+        service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
+    spec:
+      publishNotReadyAddresses: true
+      type: ClusterIP
+      ports:
+      - name: server
+        port: 6379
+        protocol: TCP
+        targetPort: redis
+      - name: sentinel
+        port: 26379
+        protocol: TCP
+        targetPort: sentinel
+      selector:
+        app: ${DATABASE_SERVICE_NAME}
+        "statefulset.kubernetes.io/pod-name": ${DATABASE_SERVICE_NAME}-server-2
+#redis-ha-service
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: ${DATABASE_SERVICE_NAME}
+      labels:
+        app: ${DATABASE_SERVICE_NAME}
+      annotations:
+    spec:
+      type: ClusterIP
+      clusterIP: None
+      ports:
+      - name: server
+        port: 6379
+        protocol: TCP
+        targetPort: redis
+      - name: sentinel
+        port: 26379
+        protocol: TCP
+        targetPort: sentinel
+      selector:
+        app: ${DATABASE_SERVICE_NAME}
+#redis-ha-statefulset
+  - apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: ${DATABASE_SERVICE_NAME}-server
+      labels:
+        app: ${DATABASE_SERVICE_NAME}
+    spec:
+      selector:
+        matchLabels:
+          app: ${DATABASE_SERVICE_NAME}
+      serviceName: ${DATABASE_SERVICE_NAME}
+      replicas: 3
+      podManagementPolicy: OrderedReady
+      updateStrategy:
+        type: RollingUpdate
+      template:
+        metadata:
+          annotations:
+            checksum/init-config: f8aa0e287b68395a3b587a14786500063bcc5f23b3a9a389c3acb3b1ad35f384
+            checksum/probe-config: bce05cf749a9fa7b9ffc95ebce5a95624e1f23a5b25a773b90074d7c0fa3f134
+          labels:
+            app: ${DATABASE_SERVICE_NAME}
+        spec:
+          affinity:
+            podAntiAffinity:
+#              requiredDuringSchedulingIgnoredDuringExecution:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app: ${DATABASE_SERVICE_NAME}
+                  topologyKey: kubernetes.io/hostname
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        app:  ${DATABASE_SERVICE_NAME}
+                    topologyKey: failure-domain.beta.kubernetes.io/zone
+          securityContext:
+            #fsGroup: 1000
+            runAsNonRoot: true
+            #runAsUser: 1000
+    
+          serviceAccountName: ${DATABASE_SERVICE_NAME}
+          initContainers:
+          - name: config-init
+            image: redis:5.0.5-alpine
+            imagePullPolicy: IfNotPresent
+            resources:
+              {}
+    
+            command:
+            - sh
+            args:
+            - /readonly-config/init.sh
+            env:
+            - name: SENTINEL_ID_0
+              value: 4abaf25823a8142757e2aa5ea5f1c43f65b40abb
+    
+            - name: SENTINEL_ID_1
+              value: 559e00289aecc93eeb124e2e88561e58c9d928dc
+    
+            - name: SENTINEL_ID_2
+              value: 4179777faf13f1bde30e6041da040b8ee727cc89
+    
+            - name: AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: ${DATABASE_SERVICE_NAME}
+                  key: auth
+            volumeMounts:
+            - name: config
+              mountPath: /readonly-config
+              readOnly: true
+            - name: data
+              mountPath: /data
+          containers:
+          - name: redis
+            image: redis:5.0.5-alpine
+            imagePullPolicy: IfNotPresent
+            command:
+            - redis-server
+            args:
+            - /data/conf/redis.conf
+            env:
+            - name: AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: ${DATABASE_SERVICE_NAME}
+                  key: auth
+            livenessProbe:
+              exec:
+                command: [ "sh", "/probes/liveness.sh", "6379"]
+              initialDelaySeconds: 15
+              periodSeconds: 5
+            readinessProbe:
+              exec:
+                command: ["sh", "/probes/readiness.sh", "6379"]
+              initialDelaySeconds: 15
+              periodSeconds: 5
+            resources:
+              {}
+    
+            ports:
+            - name: redis
+              containerPort: 6379
+            volumeMounts:
+            - mountPath: /data
+              name: data
+            - mountPath: /probes
+              name: probes
+          - name: sentinel
+            image: redis:5.0.5-alpine
+            imagePullPolicy: IfNotPresent
+            command:
+              - redis-sentinel
+            args:
+              - /data/conf/sentinel.conf
+            env:
+            - name: AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: ${DATABASE_SERVICE_NAME}
+                  key: auth
+            livenessProbe:
+              exec:
+                command: [ "sh", "/probes/readiness.sh", "26379"]
+              initialDelaySeconds: 15
+              periodSeconds: 5
+            readinessProbe:
+              exec:
+                command: ["sh", "/probes/readiness.sh", "26379"]
+              initialDelaySeconds: 15
+              periodSeconds: 5
+            resources:
+              {}
+    
+            ports:
+              - name: sentinel
+                containerPort: 26379
+            volumeMounts:
+            - mountPath: /data
+              name: data
+            - mountPath: /probes
+              name: probes
+          volumes:
+          - name: config
+            configMap:
+              name: ${DATABASE_SERVICE_NAME}-configmap
+          - name: probes
+            configMap:
+              name: ${DATABASE_SERVICE_NAME}-probes
+      volumeClaimTemplates:
+      - metadata:
+          name: data
+          annotations:
+        spec:
+          accessModes:
+            - "ReadWriteOnce"
+          resources:
+            requests:
+              storage: "10Gi"
+parameters:
+  - description: The name of the OpenShift Service exposed for the database.
+    displayName: Database Service Name
+    name: DATABASE_SERVICE_NAME
+    required: true
+    value: redis
+  - description: Password for the Redis connection user.
+    displayName: Redis Connection Password
+    from: "[a-zA-Z0-9]{16}"
+    generate: expression
+    name: REDIS_PASSWORD
+    required: true
+  - description: Redis convention for naming the cluster group.
+    displayName: Master Group Name
+    name: MASTER_GROUPNAME
+    required: true

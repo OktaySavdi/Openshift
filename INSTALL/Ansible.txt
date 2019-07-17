@@ -1,0 +1,59 @@
+[OSEv3:children]
+masters
+nodes
+etcd
+lb
+glusterfs
+
+[masters]
+labocms01.lab.com
+labocms02.lab.com
+labocms03.lab.com
+[etcd]
+labocms01.lab.com
+labocms02.lab.com
+labocms03.lab.com
+[nodes]
+labocms01.lab.com openshift_node_group_name='node-config-master'
+labocms02.lab.com openshift_node_group_name='node-config-master'
+labocms03.lab.com openshift_node_group_name='node-config-master'
+labocnd01.lab.com openshift_node_group_name='node-config-compute'
+labocnd02.lab.com openshift_node_group_name='node-config-compute'
+labocnd03.lab.com openshift_node_group_name='node-config-infra'
+[lb]
+laboclb01.lab.com
+[glusterfs]
+labocnd01.lab.com glusterfs_devices='["/dev/sdb"]'
+labocnd02.lab.com glusterfs_devices='["/dev/sdb"]'
+labocnd03.lab.com glusterfs_devices='["/dev/sdb"]'
+
+[OSEv3:vars]
+debug_level=4
+ansible_ssh_user=root
+openshift_metrics_install_metrics=true
+
+containerized=True
+openshift_disable_check=disk_availability,docker_storage,memory_availability,docker_image_availability
+
+deployment_type=origin
+openshift_deployment_type=origin
+
+openshift_release="v3.11.0"
+osm_use_cockpit=true
+
+openshift_master_cluster_method=native
+openshift_master_cluster_hostname=openshift-internal.lab.com
+openshift_master_cluster_public_hostname=openshift-cluster.lab.com
+openshift_master_default_subdomain=apps.lab.com
+
+openshift_storage_glusterfs_namespace=app-storage
+openshift_storage_glusterfs_storageclass=true
+openshift_storage_glusterfs_storageclass_default=false
+openshift_storage_glusterfs_block_deploy=true
+openshift_storage_glusterfs_block_host_vol_size=100
+openshift_storage_glusterfs_block_storageclass=true
+openshift_storage_glusterfs_block_storageclass_default=false
+
+openshift_hosted_registry_storage_kind=glusterfs
+openshift_hosted_registry_replicas=3
+openshift_hosted_registry_storage_volume_size=10Gi
