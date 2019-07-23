@@ -3,10 +3,10 @@ apiVersion: "v1"
 metadata:
   name: redis-ha
   annotations:
-    description: "Redis in-memory data structure store, high available with persistent storage. For more information about using this template, including OpenShift considerations, see https://github.com/sclorg/redis-container/blob/master/3.2.\n\nNOTE: You must have persistent volumes available in your cluster to use this template."
+    description: "Redis in-memory data structure store, high available with persistent storage. For more information about using this template, including OpenShift considerations, see https://github.com/fatihboy/openshift-templates.\n\nNOTE: You must have persistent volumes available in your cluster to use this template."
     openshift.io/display-name: "Redis HA"
-    openshift.io/documentation-url: "https://github.com/sclorg/redis-container/tree/master/3.2"
-    openshift.io/long-description: "This template provides a standalone Redis server.  The data is stored on persistent storage."
+    openshift.io/documentation-url: "https://github.com/fatihboy/openshift-templates"
+    openshift.io/long-description: "This template provides high avaliable Redis server sentinel cluster.  The data is stored on persistent storage."
     openshift.io/provider-display-name: Enterprisecoding
     openshift.io/support-url: https://www.enterprisecoding.com
     iconClass: icon-redis
@@ -21,8 +21,10 @@ objects:
       name: ${DATABASE_SERVICE_NAME}
       labels:
         app: ${DATABASE_SERVICE_NAME}
+      annotations:
+        template.openshift.io/expose-password: "{.data['auth']}"
     type: Opaque
-    data:
+    stringData:
       auth: ${REDIS_PASSWORD}
 #redis-ha-configmap
   - apiVersion: v1
@@ -55,7 +57,7 @@ objects:
       init.sh: |
         HOSTNAME="$(hostname)"
         INDEX="${HOSTNAME##*-}"
-        MASTER="$(redis-cli -h ${DATABASE_SERVICE_NAME} -p 26379 sentinel get-master-addr-by-name ${MASTER_GROUPNAME} | grep -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}')"
+        MASTER="$(redis-cli -h ${DATABASE_SERVICE_NAME}-readonly -p 26379 sentinel get-master-addr-by-name ${MASTER_GROUPNAME} | grep -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}')"
         MASTER_GROUP="${MASTER_GROUPNAME}"
         QUORUM="2"
         REDIS_CONF=/data/conf/redis.conf
@@ -63,21 +65,27 @@ objects:
         SENTINEL_CONF=/data/conf/sentinel.conf
         SENTINEL_PORT=26379
         SERVICE=${DATABASE_SERVICE_NAME}
+        SENTINEL_ID_FILE=/data/sentinel_id
         set -eu
     
         sentinel_update() {
             echo "Updating sentinel config"
-            eval MY_SENTINEL_ID="\${SENTINEL_ID_$INDEX}"
+            if [ ! -f $SENTINEL_ID_FILE ]; then
+               echo "Sentinel id file not found. Creating..."
+               cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 40 | head -n 1 > $SENTINEL_ID_FILE
+            fi
+            
+            eval MY_SENTINEL_ID=$(cat $SENTINEL_ID_FILE)
             sed -i "1s/^/sentinel myid $MY_SENTINEL_ID\\n/" "$SENTINEL_CONF"
             sed -i "2s/^/sentinel monitor $MASTER_GROUP $1 $REDIS_PORT $QUORUM \\n/" "$SENTINEL_CONF"
-            echo "sentinel announce-ip $ANNOUNCE_IP" >> $SENTINEL_CONF
+            echo "sentinel announce-ip $( hostname -i )" >> $SENTINEL_CONF
             echo "sentinel announce-port $SENTINEL_PORT" >> $SENTINEL_CONF
         }
     
         redis_update() {
             echo "Updating redis config"
             echo "slaveof $1 $REDIS_PORT" >> "$REDIS_CONF"
-            echo "slave-announce-ip $ANNOUNCE_IP" >> $REDIS_CONF
+            echo "slave-announce-ip $( hostname -i )" >> $REDIS_CONF
             echo "slave-announce-port $REDIS_PORT" >> $REDIS_CONF
         }
     
@@ -90,11 +98,11 @@ objects:
             echo "Setting up defaults"
             if [ "$INDEX" = "0" ]; then
                 echo "Setting this pod as the default master"
-                redis_update "$ANNOUNCE_IP"
-                sentinel_update "$ANNOUNCE_IP"
+                redis_update "$( hostname -i )"
+                sentinel_update "$( hostname -i )"
                 sed -i "s/^.*slaveof.*//" "$REDIS_CONF"
             else
-                DEFAULT_MASTER="$(getent hosts "$SERVICE-announce-0" | awk '{ print $1 }')"
+                DEFAULT_MASTER="$(getent hosts "$SERVICE-server-0" | awk '{ print $1 }')"
                 if [ -z "$DEFAULT_MASTER" ]; then
                     echo "Unable to resolve host"
                     exit 1
@@ -134,11 +142,7 @@ objects:
         echo "Initializing config.."
         copy_config
     
-        ANNOUNCE_IP=$(getent hosts "$SERVICE-announce-$INDEX" | awk '{ print $1 }')
-        if [ -z "$ANNOUNCE_IP" ]; then
-            "Could not resolve the announce ip for this pod"
-            exit 1
-        elif [ "$MASTER" ]; then
+        if [ "$MASTER" ]; then
             find_master
         else
             setup_defaults
@@ -200,118 +204,11 @@ objects:
             echo "Server check failed with: $CHECK_SERVER"
             exit 1
         fi
-#redis-ha-serviceaccount---TODO------------
-  - apiVersion: v1
-    kind: ServiceAccount
-    metadata:
-      name: ${DATABASE_SERVICE_NAME}
-      labels:
-        app: ${DATABASE_SERVICE_NAME}
-#redis-ha-role
-  - apiVersion: rbac.authorization.k8s.io/v1
-    kind: Role
-    metadata:
-      name: ${DATABASE_SERVICE_NAME}
-      labels:
-        app: ${DATABASE_SERVICE_NAME}
-    rules:
-    - apiGroups:
-        - ""
-      resources:
-        - endpoints
-      verbs:
-        - get
-#redis-ha-rolebinding
-  - kind: RoleBinding
-    apiVersion: rbac.authorization.k8s.io/v1
-    metadata:
-      name: ${DATABASE_SERVICE_NAME}
-      labels:
-        app: ${DATABASE_SERVICE_NAME}
-    subjects:
-    - kind: ServiceAccount
-      name: ${DATABASE_SERVICE_NAME}
-    roleRef:
-      apiGroup: rbac.authorization.k8s.io
-      kind: Role
-      name: ${DATABASE_SERVICE_NAME}
-#redis-ha-announce-service
+#redis-ha-readonly-service
   - apiVersion: v1
     kind: Service
     metadata:
-      name: ${DATABASE_SERVICE_NAME}-announce-1
-      labels:
-        app: ${DATABASE_SERVICE_NAME}
-      annotations:
-        service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
-    spec:
-      publishNotReadyAddresses: true
-      type: ClusterIP
-      ports:
-      - name: server
-        port: 6379
-        protocol: TCP
-        targetPort: redis
-      - name: sentinel
-        port: 26379
-        protocol: TCP
-        targetPort: sentinel
-      selector:
-        app: ${DATABASE_SERVICE_NAME}
-        "statefulset.kubernetes.io/pod-name": ${DATABASE_SERVICE_NAME}-server-1
-#redis-ha-announce-service
-  - apiVersion: v1
-    kind: Service
-    metadata:
-      name: ${DATABASE_SERVICE_NAME}-announce-0
-      labels:
-        app: ${DATABASE_SERVICE_NAME}
-      annotations:
-        service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
-    spec:
-      publishNotReadyAddresses: true
-      type: ClusterIP
-      ports:
-      - name: server
-        port: 6379
-        protocol: TCP
-        targetPort: redis
-      - name: sentinel
-        port: 26379
-        protocol: TCP
-        targetPort: sentinel
-      selector:
-        app: ${DATABASE_SERVICE_NAME}
-        "statefulset.kubernetes.io/pod-name": ${DATABASE_SERVICE_NAME}-server-0
-#redis-ha-announce-service
-  - apiVersion: v1
-    kind: Service
-    metadata:
-      name: ${DATABASE_SERVICE_NAME}-announce-2
-      labels:
-        app: ${DATABASE_SERVICE_NAME}
-      annotations:
-        service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
-    spec:
-      publishNotReadyAddresses: true
-      type: ClusterIP
-      ports:
-      - name: server
-        port: 6379
-        protocol: TCP
-        targetPort: redis
-      - name: sentinel
-        port: 26379
-        protocol: TCP
-        targetPort: sentinel
-      selector:
-        app: ${DATABASE_SERVICE_NAME}
-        "statefulset.kubernetes.io/pod-name": ${DATABASE_SERVICE_NAME}-server-2
-#redis-ha-service
-  - apiVersion: v1
-    kind: Service
-    metadata:
-      name: ${DATABASE_SERVICE_NAME}
+      name: ${DATABASE_SERVICE_NAME}-readonly
       labels:
         app: ${DATABASE_SERVICE_NAME}
       annotations:
@@ -341,15 +238,12 @@ objects:
         matchLabels:
           app: ${DATABASE_SERVICE_NAME}
       serviceName: ${DATABASE_SERVICE_NAME}
-      replicas: 3
+      replicas: "${{NUMBER_OF_NODES}}"
       podManagementPolicy: OrderedReady
       updateStrategy:
         type: RollingUpdate
       template:
         metadata:
-          annotations:
-            checksum/init-config: f8aa0e287b68395a3b587a14786500063bcc5f23b3a9a389c3acb3b1ad35f384
-            checksum/probe-config: bce05cf749a9fa7b9ffc95ebce5a95624e1f23a5b25a773b90074d7c0fa3f134
           labels:
             app: ${DATABASE_SERVICE_NAME}
         spec:
@@ -368,12 +262,6 @@ objects:
                       matchLabels:
                         app:  ${DATABASE_SERVICE_NAME}
                     topologyKey: failure-domain.beta.kubernetes.io/zone
-          securityContext:
-            #fsGroup: 1000
-            runAsNonRoot: true
-            #runAsUser: 1000
-    
-          serviceAccountName: ${DATABASE_SERVICE_NAME}
           initContainers:
           - name: config-init
             image: redis:5.0.5-alpine
@@ -385,16 +273,7 @@ objects:
             - sh
             args:
             - /readonly-config/init.sh
-            env:
-            - name: SENTINEL_ID_0
-              value: 4abaf25823a8142757e2aa5ea5f1c43f65b40abb
-    
-            - name: SENTINEL_ID_1
-              value: 559e00289aecc93eeb124e2e88561e58c9d928dc
-    
-            - name: SENTINEL_ID_2
-              value: 4179777faf13f1bde30e6041da040b8ee727cc89
-    
+            env:    
             - name: AUTH
               valueFrom:
                 secretKeyRef:
@@ -491,7 +370,7 @@ objects:
             - "ReadWriteOnce"
           resources:
             requests:
-              storage: "10Gi"
+              storage: "${VOLUME_CAPACITY}"
 parameters:
   - description: The name of the OpenShift Service exposed for the database.
     displayName: Database Service Name
@@ -508,3 +387,15 @@ parameters:
     displayName: Master Group Name
     name: MASTER_GROUPNAME
     required: true
+  - description: Number of nodes to start for the cluster group.
+    displayName: Number of Nodes
+    from: "[1-9][0-9]*"
+    generate: expression
+    name: NUMBER_OF_NODES
+    required: true
+    value: "3"
+  - description: Volume space available for data, e.g. 512Mi, 2Gi.
+    displayName: Volume Capacity
+    name: VOLUME_CAPACITY
+    required: true
+    value: 1Gi
