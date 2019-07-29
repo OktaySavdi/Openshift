@@ -50,6 +50,7 @@ openshift_master_default_subdomain=apps.lab.com
 openshift_logging_install_logging=true
 openshift_logging_es_pvc_dynamic=true
 openshift_logging_storage_volume_size=20Gi
+openshift_logging_elasticsearch_storage_type=pvc
 openshift_logging_kibana_nodeselector={"node-role.kubernetes.io/infra": "true"}
 openshift_logging_curator_nodeselector={"node-role.kubernetes.io/infra": "true"}
 openshift_logging_es_nodeselector={"node-role.kubernetes.io/infra": "true"}
