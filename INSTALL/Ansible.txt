@@ -46,6 +46,15 @@ openshift_master_cluster_hostname=openshift-internal.lab.com
 openshift_master_cluster_public_hostname=openshift-cluster.lab.com
 openshift_master_default_subdomain=apps.lab.com
 
+# logging
+openshift_logging_install_logging=true
+openshift_logging_es_pvc_dynamic=true
+openshift_logging_storage_volume_size=20Gi
+openshift_logging_kibana_nodeselector={"node-role.kubernetes.io/infra": "true"}
+openshift_logging_curator_nodeselector={"node-role.kubernetes.io/infra": "true"}
+openshift_logging_es_nodeselector={"node-role.kubernetes.io/infra": "true"}
+
+#glusterfs
 openshift_storage_glusterfs_namespace=app-storage
 openshift_storage_glusterfs_storageclass=true
 openshift_storage_glusterfs_storageclass_default=false
@@ -54,6 +63,7 @@ openshift_storage_glusterfs_block_host_vol_size=100
 openshift_storage_glusterfs_block_storageclass=true
 openshift_storage_glusterfs_block_storageclass_default=false
 
+#docker-registery
 openshift_hosted_registry_storage_kind=glusterfs
 openshift_hosted_registry_replicas=3
 openshift_hosted_registry_storage_volume_size=10Gi
