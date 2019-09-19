@@ -41,8 +41,7 @@
     cat > /etc/yum.repos.d/centos.repo <<EOF
     [extras]
     name=CentOS-$releasever - Extras
-    mirrorlist=http://mirrorlist.centos.org/?release=7&arch=
-    $basearch&repo=extras
+    mirrorlist=http://mirrorlist.centos.org/?release=7&arch=$basearch&repo=extras
     baseurl=http://mirror.centos.org/centos/7/extras/$basearch/
     enabled=1
     gpgcheck=0
@@ -51,8 +50,7 @@
     
     [base]
     name=CentOS-$releasever - Base
-    mirrorlist=http://mirrorlist.centos.org/?release=7&arch=
-    $basearch&repo=os
+    mirrorlist=http://mirrorlist.centos.org/?release=7&arch=$basearch&repo=os
     baseurl=http://mirror.centos.org/centos/7/os/$basearch/
     enabled=1
     gpgcheck=0
@@ -62,8 +60,7 @@
     #released updates
     [updates]
     name=CentOS-$releasever - Updates
-    mirrorlist=http://mirrorlist.centos.org/?release=7&arch=
-    $basearch&repo=updates
+    mirrorlist=http://mirrorlist.centos.org/?release=7&arch=$basearch&repo=updates
     baseurl=http://mirror.centos.org/centos/7/updates/$basearch/
     enabled=1
     gpgcheck=0
