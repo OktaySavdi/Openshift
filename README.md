@@ -70,10 +70,11 @@ configure dnsmasq
     vi /etc/dnsmasq.d/oc.conf
 
 ```json
+domain=oc.local
+
 server=/10.168.192.in-addr.arpa/192.168.10.1
 local=/hb.oc.local/
-address=/apps.hb.oc.local/hb.oc.local/192.168.10.1
-address=/hb.oc.local/192.168.10.1
+address=/apps.hb.oc.local/192.168.10.1
     
 srv-host=_etcd-server-ssl._tcp.hb.oc.local,etcd-0.hb.oc.local,2380,0,10
     
