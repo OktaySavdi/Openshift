@@ -403,11 +403,19 @@ Prerequisites
 
 Procedure
 
-Monitor the bootstrap process:
+Monitor the bootstrap process an control:
 ```bash
 ssh core@bootstrap.hb.oc.local
     
 journalctl -b -f -u bootkube.service
+
+for pod in $(sudo podman ps -a -q); do sudo podman logs $pod; done
+
+tail -f /var/lib/containers/storage/overlay-containers/*/userdata/ctr.log
+
+journalctl -b -f -u kubelet.service -u crio.service
+
+sudo tail -f /var/log/containers/*
 ```   
 ![image](https://user-images.githubusercontent.com/3519706/77407784-be7cf080-6dc7-11ea-96f1-c87aeeac34af.png)
 
