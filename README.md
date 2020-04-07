@@ -403,7 +403,7 @@ Prerequisites
 
 Procedure
 
-Monitor the bootstrap process an control:
+Monitor the bootstrap process and control:
 ```bash
 ssh core@bootstrap.hb.oc.local
     
