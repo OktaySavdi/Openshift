@@ -197,7 +197,7 @@ backend ingress-80
     mode tcp
     server worker-01.hb.oc.local 192.168.10.5:80 check
     server worker-02.hb.oc.local 192.168.10.6:80 check
-    server worker-02.hb.oc.local 192.168.10.7:80 check
+    server worker-03.hb.oc.local 192.168.10.7:80 check
 ```
 Configure Firewall
 ```bash
