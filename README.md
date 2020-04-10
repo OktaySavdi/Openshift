@@ -396,9 +396,9 @@ Necessary checks are made,
 - The machine can access the internet
 
 The machine receives IP, 
-`ssh core@192.168.10.2` on dns server machine
+`ssh core@192.168.10.8` on dns server machine
 
-![image](https://user-images.githubusercontent.com/3519706/77432317-f4819b00-6dee-11ea-8582-593fb02b7498.png)
+![image](https://user-images.githubusercontent.com/3519706/78999061-8b21bc00-7b52-11ea-9cfc-ce0cb3d14d7c.png)
 
 It is checked whether there is internet access with the command `curl www.google.com`.
 ![image](https://user-images.githubusercontent.com/3519706/77406134-3d245e80-6dc5-11ea-85c6-845df3afb158.png)
