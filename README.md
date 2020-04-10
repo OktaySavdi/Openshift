@@ -21,10 +21,10 @@ The bootstrap, control plane, and compute machines must use the Red Hat Enterpri
 <_IP3_> master-01.hb.oc.local 
 <_IP4_> master-02.hb.oc.local 
 <_IP5_> master-03.hb.oc.local 
-<_IP7_> worker-01.hb.oc.local  
-<_IP8_> worker-02.hb.oc.local
-<_IP9_> worker-03.hb.oc.local
-<_IP10_> bootstrap.hb.oc.local 
+<_IP6_> worker-01.hb.oc.local  
+<_IP7_> worker-02.hb.oc.local
+<_IP8_> worker-03.hb.oc.local
+<_IP9_> bootstrap.hb.oc.local 
 ```
 ## Installation steps
 
@@ -63,7 +63,7 @@ configure /etc/hosts
 192.168.10.2 etcd-0.hb.oc.local
 192.168.10.3 etcd-1.hb.oc.local
 192.168.10.4 etcd-2.hb.oc.local
-192.168.10.6 http.hb.oc.local
+192.168.10.9 http.hb.oc.local
 192.168.10.8 bootstrap.hb.oc.local
 ``` 
   
@@ -237,7 +237,7 @@ ssh-add /root/.ssh/id_rsa
 ```
 **Configure passwordless SSH from LB to HTTP server**
 ```bash
-ssh-copy-id -i /root/.ssh/id_rsa.pub root@192.168.10.6
+ssh-copy-id -i /root/.ssh/id_rsa.pub root@192.168.10.9
 ```
 
 **Download the RHCOS OVA file to create template on V-Center**
@@ -355,7 +355,7 @@ The following files are generated in the directory:
 
 4- Copy new ignition file to Nginx server
 ```bash
-scp -r ignition/* root@192.168.10.6:/usr/share/nginx/html/
+scp -r ignition/* root@192.168.10.9:/usr/share/nginx/html/
 ```
 **Creating Red Hat Enterprise Linux CoreOS (RHCOS) machines using an ISO image  /  <_IP2_> lb.hb.oc.local _**
 
@@ -371,18 +371,18 @@ You must download the ISO file and the RAW disk file
 [https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/4.3/4.3.0/](https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/4.3/4.3.0/)
 ```bash
 wget https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/4.3/4.3.0/rhcos-4.3.0-x86_64-metal.raw.gz 
-scp -r rhcos-4.3.0-x86_64-metal.raw.gz  root@192.168.10.6:/usr/share/nginx/html/
+scp -r rhcos-4.3.0-x86_64-metal.raw.gz  root@192.168.10.9:/usr/share/nginx/html/
 ```
 Mount the iso file to the server and run the machine.
 ![https://github.com/OktaySavdi/CoreOS/blob/master/install_Fedora_CoreOS](https://user-images.githubusercontent.com/3519706/77246525-50a2be80-6c39-11ea-85cb-ed5a3d57fd9d.png)
 
 When you see Fedora CoreOS (Live) screen press the `TAB` button and fill the section ip with your own information
 ```json
-coreos.inst.install_dev=sda coreos.inst.image_url=http://192.168.10.6/rhcos-4.3.0-x86_64-metal.raw.gz coreos.inst.ignition_url=http://192.168.10.6/bootstrap.ign ip=dhcp
+coreos.inst.install_dev=sda coreos.inst.image_url=http://192.168.10.9/rhcos-4.3.0-x86_64-metal.raw.gz coreos.inst.ignition_url=http://192.168.10.9/bootstrap.ign ip=dhcp
 ```
 If you set an individual static IP address try it
 ```json
-coreos.inst.install_dev=sda coreos.inst.image_url=http://192.168.10.6/rhcos-4.3.0-x86_64-metal.raw.gz coreos.inst.ignition_url=http://192.168.10.6/bootstrap.ign ip=192.168.10.4::10.57.165.254:255.255.255.0:bootstrap.hb.oc.local:ens192:none nameserver=192.168.10.1
+coreos.inst.install_dev=sda coreos.inst.image_url=http://192.168.10.9/rhcos-4.3.0-x86_64-metal.raw.gz coreos.inst.ignition_url=http://192.168.10.9/bootstrap.ign ip=192.168.10.4::192.168.10.254:255.255.255.0:bootstrap.hb.oc.local:ens192:none nameserver=192.168.10.1
 ```
 ![image](https://user-images.githubusercontent.com/3519706/77431792-4118a680-6dee-11ea-870d-edbbf648408e.png)
 
