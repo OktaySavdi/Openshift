@@ -17,11 +17,14 @@ The bootstrap, control plane, and compute machines must use the Red Hat Enterpri
 **hostnames**  
 ```json
 <_IP1_> http.hb.oc.local  
-<_IP2_> lb.hb.oc.local  
-<_IP3_> bootstrap.hb.oc.local  
-<_IP4_> master-01.hb.oc.local  
+<_IP2_> lb.hb.oc.local 
+<_IP3_> master-01.hb.oc.local 
+<_IP4_> master-02.hb.oc.local 
+<_IP5_> master-03.hb.oc.local 
 <_IP7_> worker-01.hb.oc.local  
-<_IP8_> worker-02.hb.oc.local 
+<_IP8_> worker-02.hb.oc.local
+<_IP9_> worker-03.hb.oc.local
+<_IP10_> bootstrap.hb.oc.local 
 ```
 ## Installation steps
 
@@ -50,13 +53,18 @@ yum install dnsmasq -y
 configure /etc/hosts
 ```json
 192.168.10.1 lb.oc.local
-192.168.10.2 bootstrap.hb.oc.local
-192.168.10.3 master-01.hb.oc.local
-192.168.10.4 worker-01.hb.oc.local
-192.168.10.5 worker-02.hb.oc.local
+192.168.10.2 master-01.hb.oc.local
+192.168.10.3 master-02.hb.oc.local
+192.168.10.4 master-03.hb.oc.local
+192.168.10.5 worker-01.hb.oc.local
+192.168.10.6 worker-02.hb.oc.local
+192.168.10.7 worker-02.hb.oc.local
 192.168.10.1 api.hb.oc.local api-int api-int.hb.oc.local
-192.168.10.3 etcd-0.hb.oc.local
+192.168.10.2 etcd-0.hb.oc.local
+192.168.10.3 etcd-1.hb.oc.local
+192.168.10.4 etcd-2.hb.oc.local
 192.168.10.6 http.hb.oc.local
+192.168.10.8 bootstrap.hb.oc.local
 ``` 
   
 open firewall
@@ -77,8 +85,17 @@ local=/hb.oc.local/
 address=/apps.hb.oc.local/192.168.10.1
     
 srv-host=_etcd-server-ssl._tcp.hb.oc.local,etcd-0.hb.oc.local,2380,0,10
+srv-host=_etcd-server-ssl._tcp.hb.oc.local,etcd-1.hb.oc.local,2380,0,10
+srv-host=_etcd-server-ssl._tcp.hb.oc.local,etcd-2.hb.oc.local,2380,0,10
     
-dhcp-range=ens192,192.168.10.1,192.168.10.6,255.255.255.0,2m
+dhcp-range=ens192,192.168.10.1,192.168.10.8,255.255.255.0,2m
+dhcp-host=00:10:12:20:57:4b,192.168.10.2
+dhcp-host=00:10:12:20:62:26,192.168.10.3
+dhcp-host=00:10:12:20:bd:b3,192.168.10.4
+dhcp-host=00:10:12:20:9a:ea,192.168.10.5
+dhcp-host=00:10:12:20:fd:45,192.168.10.6
+dhcp-host=00:10:12:20:53:f5,192.168.10.7
+dhcp-host=00:10:12:20:f5:8b,192.168.10.8
 dhcp-option=ens192,3,192.168.10.254
 dhcp-option=6,192.168.10.1
 ```
@@ -149,32 +166,38 @@ frontend http
 backend kube-api-server-6443
     balance roundrobin
     mode tcp
-    server master-01.hb.oc.local 192.168.10.3:6443 check
-    server bootstrap.hb.oc.local 192.168.10.2:6443 check
+    server master-01.hb.oc.local 192.168.10.2:6443 check
+    server master-02.hb.oc.local 192.168.10.3:6443 check
+    server master-03.hb.oc.local 192.168.10.4:6443 check
+    server bootstrap.hb.oc.local 192.168.10.8:6443 check
 #---------------------------------------------------------------------
 # round robin balancing between the machine-config machines
 #---------------------------------------------------------------------
 backend machine-config-server-22623
     balance roundrobin
     mode tcp
-    server master-01.hb.oc.local 192.168.10.3:22623 check
-    server bootstrap.hb.oc.local 192.168.10.2:22623 check
+    server master-01.hb.oc.local 192.168.10.2:22623 check
+    server master-02.hb.oc.local 192.168.10.3:22623 check
+    server master-03.hb.oc.local 192.168.10.4:22623 check
+    server bootstrap.hb.oc.local 192.168.10.8:22623 check
 #---------------------------------------------------------------------
 # round robin balancing between the workers
 #---------------------------------------------------------------------
 backend ingress-443
     balance roundrobin
     mode tcp
-    server worker-01.hb.oc.local 192.168.10.4:443 check
-    server worker-02.hb.oc.local 192.168.10.5:443 check
+    server worker-01.hb.oc.local 192.168.10.5:443 check
+    server worker-02.hb.oc.local 192.168.10.6:443 check
+    server worker-03.hb.oc.local 192.168.10.7:443 check
 #---------------------------------------------------------------------
 # round robin balancing between the workers
 #---------------------------------------------------------------------
 backend ingress-80
     balance roundrobin
     mode tcp
-    server worker-01.hb.oc.local 192.168.10.4:80 check
-    server worker-02.hb.oc.local 192.168.10.5:80 check
+    server worker-01.hb.oc.local 192.168.10.5:80 check
+    server worker-02.hb.oc.local 192.168.10.6:80 check
+    server worker-02.hb.oc.local 192.168.10.7:80 check
 ```
 Configure Firewall
 ```bash
@@ -285,7 +308,7 @@ compute:
 controlPlane:
   hyperthreading: Enabled   
   name: master 
-  replicas: 1 
+  replicas: 3 
 metadata:
   name: hb
 networking:
