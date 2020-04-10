@@ -468,7 +468,7 @@ PATH=$PATH:$HOME/bin:$KUBECONFIG
 ```bash
 oc get nodes
 ```
-![image](https://user-images.githubusercontent.com/3519706/77420526-40c2e000-6ddb-11ea-8a0c-d8b939720210.png)
+![image](https://user-images.githubusercontent.com/3519706/78999345-156a2000-7b53-11ea-90df-8b394175326b.png)
 
  2- Review the pending certificate signing requests (CSRs) and ensure that the you see a client and server request with `Pending` or `Approved` status for each machine that you added to the cluster:
 ```bash
