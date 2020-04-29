@@ -229,6 +229,86 @@ Check haproxy service and stats page
 ```bash
 systemctl status haproxy
 ```
+**DNS settings are checked**
+```bash
+[oktay@http ~]$ dig master-01.hb.oc.local +short
+192.168.10.2 
+
+[oktay@http ~]$ dig master-02.hb.oc.local +short
+192.168.10.3
+
+[oktay@http ~]$ dig master-03.hb.oc.local +short
+192.168.10.4
+
+[oktay@http ~]$ dig worker-01.hb.oc.local +short
+192.168.10.5
+
+[oktay@http ~]$ dig worker-02.hb.oc.local +short
+192.168.10.6
+
+[oktay@http ~]$ dig worker-03.hb.oc.local +short
+192.168.10.7
+
+[oktay@http ~]$ dig bootstrap.hb.oc.local +short
+192.168.10.8
+
+[oktay@http ~]$ dig etcd-0.hb.oc.local +short
+192.168.10.2 
+
+[oktay@http ~]$ dig etcd-1.hb.oc.local +short
+192.168.10.3
+
+[oktay@http ~]$ dig etcd-2.hb.oc.local +short
+192.168.10.4
+```
+Also, it's important to set up reverse DNS for these entries as well (since you're using DHCP, this is particularly important).
+
+```bash
+[oktay@http ~]$ dig -x 192.168.10.2  +short
+master-01.hb.oc.local +short
+
+[oktay@http ~]$ dig 192.168.10.3 +short
+master-02.hb.oc.local
+
+[oktay@http ~]$ dig 192.168.10.4 +short
+master-03.hb.oc.local
+
+[oktay@http ~]$ dig 192.168.10.5 +short
+worker-01.hb.oc.local
+
+[oktay@http ~]$ dig 192.168.10.6 +short
+worker-02.hb.oc.local
+
+[oktay@http ~]$ dig 192.168.10.7 +short
+worker-03.hb.oc.local
+
+[oktay@http ~]$ dig 192.168.10.8 +short
+bootstrap.hb.oc.local
+```
+
+The DNS lookup for the API endpoints also needs to be in place. OpenShift 4 expects `api.$CLUSTERDOMAIN` and `api-int.$CLUSTERDOMAIN` to be configured, they can both be set to the same IP address - which will be the IP of the Load Balancer.
+
+```bash
+[oktay@http ~]$ dig api.hb.oc.local +short
+192.168.10.1
+
+[oktay@http ~]$ dig api-int.hb.oc.local +short
+192.168.10.1
+```
+A wildcard DNS entry needs to be in place for the OpenShift 4 ingress router, which is also a load balanced endpoint.
+```bash
+[oktay@http ~]$ dig *.apps.hb.oc.local +short
+192.168.10.1
+```
+In addition to the mentioned entries, you'll also need to add SRV records. These records are needed for the masters to find the etcd servers. This needs to be in the form of `_etcd-server-ssl._tcp.$CLUSTERDOMMAIN` in your DNS server.
+
+```bash
+[oktay@http ~]$  dig _etcd-server-ssl._tcp.hb.oc.local SRV +short
+0 10 2380 etcd-0.hb.oc.local.
+0 10 2380 etcd-1.hb.oc.local.
+0 10 2380 etcd-2.hb.oc.local.
+```
+
 **Generate SSH Private Key and add to the agent on LB /  <_IP2_> lb.hb.oc.local _**
 ```bash
 ssh-keygen -t rsa -b 4096 -N '' -f /root/.ssh/id_rsa
