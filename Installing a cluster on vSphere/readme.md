@@ -381,7 +381,7 @@ You can customize the `install-config.yaml` file to specify more details about y
     vi install-config.yaml
 ```yaml
 apiVersion: v1
-baseDomain: example.com 
+baseDomain: oc.local
 compute:
 - hyperthreading: Enabled   
   name: worker
