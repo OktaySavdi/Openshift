@@ -31,6 +31,6 @@ Note: allinone.crt -> combination of root and ca certificates
 
 ![image](https://user-images.githubusercontent.com/3519706/80638570-5033e980-8a69-11ea-862a-67aba014007d.png)
 
-![image](https://user-images.githubusercontent.com/3519706/80638691-84a7a580-8a69-11ea-9769-260e9e7b0829.png)
+![image](https://user-images.githubusercontent.com/3519706/80638982-00a1ed80-8a6a-11ea-8834-ce5a3f88da4f.png)
 
 ![image](https://user-images.githubusercontent.com/3519706/80638797-b02a9000-8a69-11ea-9609-36187c1fe519.png)
