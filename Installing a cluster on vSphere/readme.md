@@ -434,6 +434,8 @@ The following files are generated in the directory:
 
 4- Upload the bootstrap Ignition config file, which is named `<installation_directory>/bootstrap.ign`, that the installation program created to your HTTP server. Note the URL of this file
 
+Save the following secondary Ignition config file for your bootstrap node to your computer as `<installation_directory>/append-bootstrap.ign`.
+
 ```sh
 vi append-bootstrap.ign
 ```
