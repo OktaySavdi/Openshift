@@ -58,7 +58,7 @@ configure /etc/hosts
 192.168.10.4 master-03.hb.oc.local
 192.168.10.5 worker-01.hb.oc.local
 192.168.10.6 worker-02.hb.oc.local
-192.168.10.7 worker-02.hb.oc.local
+192.168.10.7 worker-03.hb.oc.local
 192.168.10.1 api.hb.oc.local api-int api-int.hb.oc.local
 192.168.10.2 etcd-0.hb.oc.local
 192.168.10.3 etcd-1.hb.oc.local
