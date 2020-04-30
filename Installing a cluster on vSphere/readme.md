@@ -445,7 +445,7 @@ vi append-bootstrap.ign
     "config": {
       "append": [
         {
-          "source": "http://192.168.10.9/append-bootstrap.ign", 
+          "source": "http://192.168.10.9/bootstrap.ign", 
           "verification": {}
         }
       ]
@@ -468,7 +468,7 @@ vi append-master.ign
     "config": {
       "append": [
         {
-          "source": "http://192.168.10.9/append-master.ign", 
+          "source": "http://192.168.10.9/master.ign", 
           "verification": {}
         }
       ]
@@ -492,7 +492,7 @@ vi append-worker.ign
     "config": {
       "append": [
         {
-          "source": "http://192.168.10.9/append-worker.ign", 
+          "source": "http://192.168.10.9/worker.ign", 
           "verification": {}
         }
       ]
