@@ -10,7 +10,7 @@ oc create secret generic ldap-secret --from-literal=bindPassword=<secret> -n ope
 ```
 Define an OpenShift Container Platform ConfigMap containing the certificate authority by using the following command. The certificate authority must be stored in the ca.crt key of the ConfigMap.
 ```
-oc create configmap ca-config-map --from-file=ca.crt=/path/to/ca -n openshift-config
+oc create configmap ca-config-map --from-file=ca.crt=/path/to/ca.crt -n openshift-config
 ``` 
 ### Get-ADUser with distinguishedname
 ``` 
