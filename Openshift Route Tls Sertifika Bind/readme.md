@@ -1,4 +1,4 @@
-## Openshift Route Tls Sertifika Bind
+## Openshift Route TLS Sertifika Bind
 
 ##### **First Way**
 ```bash
