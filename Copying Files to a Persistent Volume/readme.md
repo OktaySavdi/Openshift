@@ -17,7 +17,7 @@ Once it is running, you can see the more limited set of resources created, as co
 ```ruby
 oc get all --selector web=nginx -o name
 ```
-Now that we have a running application, we next need to claim a persistent volume and mount it against our dummy application. When doing this we assign it a claim name of data so we can refer to the claim by a set name later on. We mount the persistent volume at /mnt inside of the container, the traditional directory used in Linux systems for temporarily mounting a volume.
+Now that we have a running application, we next need to claim a persistent volume and mount it against our dummy application. When doing this we assign it a claim name of data so we can refer to the claim by a set name later on. We mount the persistent volume at /data inside of the container, the traditional directory used in Linux systems for temporarily mounting a volume.
 ```ruby
 oc set volume po/nginx --add --name=tmp-mount --claim-name=data --type pvc --claim-size=1G --mount-path /data
 ```
