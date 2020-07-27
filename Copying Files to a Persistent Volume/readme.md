@@ -31,7 +31,7 @@ The command we will run from the shell function to get out just the name of the 
 ```ruby
 POD=$(oc get pods --selector web=nginx -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}')
 ```
-We can now copy any files into the persistent volume, using the /mnt directory where we mounted the persistent volume, as the target directory. In this case since we are doing a one off copy, we can use the tar strategy instead of the rsync strategy.
+We can now copy any files into the persistent volume, using the /data directory where we mounted the persistent volume, as the target directory. In this case since we are doing a one off copy, we can use the tar strategy instead of the rsync strategy.
 ```ruby
 oc rsync ./ $POD:/data --strategy=tar
 ```
