@@ -7,8 +7,6 @@ To create a dummy application for this purpose run the command:
 ```ruby
 oc run nginx --image=nginx --restart=Always --labels="web=nginx"
 ```
-We use the oc run command as it creates just a deployment configuration and managed pod. A service is not created as we don't actually need the application we are running here, an instance of the Apache HTTPD server in this case, to actually be contactable. We are using the Apache HTTPD server purely as a means of keeping the pod running.
-
 To monitor the startup of the pod and ensure it is deployed, run:
 ```ruby
 oc rollout status dc/nginx
