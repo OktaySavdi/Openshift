@@ -2,7 +2,7 @@
 
 **A new project is created**
 ```ruby
-oc new-project oktay
+oc new-project upy
 ```
 Login to the openshift console
 
