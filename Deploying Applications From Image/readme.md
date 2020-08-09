@@ -5,6 +5,7 @@
 oc new-project upy
 ```
 Login to the openshift console
+
 ![image](https://user-images.githubusercontent.com/3519706/89736602-3431e200-da73-11ea-8f52-028c053a6214.png)
 
 Developer > +Add
@@ -14,6 +15,7 @@ Developer > +Add
 ![image](https://user-images.githubusercontent.com/3519706/89736668-ba4e2880-da73-11ea-9be4-6975e541c711.png)
 
 Controls are made.
+
 POD control is done via Developer> Topology
 
 ![image](https://user-images.githubusercontent.com/3519706/89736686-d9e55100-da73-11ea-95ee-2943859173e5.png)
