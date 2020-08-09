@@ -8,6 +8,7 @@ Egress IP addresses are implemented as additional IP addresses on the primary ne
 Manually assigned, Multiple egress IP addresses per namespace are supported.
 
 **Configuring automatically assigned egress IP addresses for a namespace**
+
 1- A project named UPY is created.
 ```ruby
 oc new-project upy
@@ -32,6 +33,7 @@ oc patch netnamespace upy --type=merge -p '{"egressIPs": ["192.168.1.100"]}'
 oc get netnamespace upy
 ```
 **Configuring manually assigned egress IP addresses for a namespace**
+
 1- A project named UPY is created.
 ```ruby
 oc new-project upy
