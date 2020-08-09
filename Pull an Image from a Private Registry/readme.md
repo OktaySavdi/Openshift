@@ -46,7 +46,7 @@ The value of the  `.dockerconfigjson`  field is a base64 representation of your 
 To understand what is in the  `.dockerconfigjson`  field, convert the secret data to a readable format:
 
 ```ruby
-kubectl get secret regcred --output="jsonpath={.data.\.dockerconfigjson}" | base64 --decode
+oc get secret regcred --output="jsonpath={.data.\.dockerconfigjson}" | base64 --decode
 ```
 To understand what is in the `auth` field, convert the base64-encoded data to a readable format:
 ```ruby
