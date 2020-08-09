@@ -2,12 +2,13 @@
 
 **cacert file is identified as secret**
 ```ruby
-oc create secret generic cacert --from-file=/root/cacert
+oc create secret generic cacerts --from-file=/root/cacerts
 ```
-Control is made on the Console that a secret has been created
-![image](https://user-images.githubusercontent.com/3519706/89735550-009f8980-da6c-11ea-9359-d1c8a3c36a6e.png)
+**Control is made on the Console that a secret has been created**
 
-Mounted inside the secret deployment
+![image](https://user-images.githubusercontent.com/3519706/89736510-95a58100-da72-11ea-8c72-4cdace1918c3.png)
+
+**Mounted inside the secret deployment**
 ```yaml
 spec:
   containers:
