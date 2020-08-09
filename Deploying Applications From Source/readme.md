@@ -5,6 +5,7 @@
 oc new-project upy
 ```
 Login to the openshift console
+
 ![image](https://user-images.githubusercontent.com/3519706/89736602-3431e200-da73-11ea-8f52-028c053a6214.png)
 
 Developer > +Add
