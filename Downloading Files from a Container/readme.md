@@ -1,4 +1,4 @@
-## Downloading Files from a Container
+## Downloading Files from a Container in Openshift
 
 To create a dummy application for this purpose run the command:
 ```ruby
