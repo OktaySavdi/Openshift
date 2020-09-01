@@ -1,5 +1,3 @@
-cert
-
 ## Integrating OpenShift with an Enterprise Certificate Authority
 
 
