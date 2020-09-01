@@ -49,6 +49,10 @@ oc set env --from=secret/test-secret dc/map
 # Volume
 oc set volume rc/r1 --add --name=v1 --type=secret --secret-name='secret1' --mount-path=/data
 ```
+**Limit - Resource**
+```ruby
+oc set resources deployment hello-world-nginx --requests cpu=10m,memory=20Mi --limits cpu=80m,memory=100Mi
+```
 **Probe**
 ```ruby
 oc set probe deployment/hello-node --readiness --get-url=http://:8766/actuator/health --timeout-seconds=1 --initial-delay-seconds=15 --liveness --get-url=http://:8766/actuator/health --timeout-seconds=1 --initial-delay-seconds=15
