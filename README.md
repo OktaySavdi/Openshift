@@ -154,6 +154,9 @@ oc get pv --sort-by=.spec.capacity.storage -o=custom-columns=NAME:.metadata.name
 # Partially update a node
 oc patch node k8s-node-1 -p '{"spec":{"unschedulable":true}}'
 
+# Update a node env
+oc patch deployment/myapp --patch '{"spec":{"template":{"spec":{"nodeSelector":{"env":"dev"}}}}}'
+
 # Add a new element to a positional array
 oc patch sa default --type='json' -p='[{"op": "add", "path": "/secrets/1", "value": {"name": "whatever" } }]'
 
