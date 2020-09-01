@@ -78,9 +78,13 @@ spec:
           serviceAccount: ldap-group-syncer-sa
 ```
 Schedule the job to run every minute to have shorter test cycles.
+
 Provide an OCI image to run the **CronJob**. This image must contain the oc command.
+
 The command to execute in the **CronJob** is the sync command with **--confirm**.
+
 Provide the Secret and **ConfigMap** to the **CronJob**.
+
 Provide a **ServiceAccount**, which can execute **get, list, create, update** verbs on the **groups** resource.
 
 **Verify LDAP Group Synchronization**
