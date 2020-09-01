@@ -103,6 +103,9 @@ oc get pod  | grep Evicted | awk '{print $1}' | xargs oc delete pod
 # Delete Failed pods
 oc delete $(oc get pods --field-selector=status.phase=Failed -o name -n cluster-management) -n cluster-management
 
+# Auto scale
+oc autoscale dc/hello --min 1 --max 10 --cpu-percent 80
+
 oc config view
 oc config get-contexts                           # display list of contexts 
 oc config current-context                        # display the current-context
