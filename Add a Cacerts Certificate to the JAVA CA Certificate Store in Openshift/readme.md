@@ -22,6 +22,10 @@ spec:
       secret:
         secretName: cacerts
 ```
+or
+```ruby
+oc set volume dc/<DC-NAME> -t configmap --name cacerts --add --read-only=true --mount-path /externalfilesca --configmap-name cacerts
+```
 
 ![image](https://user-images.githubusercontent.com/3519706/89736097-b7e9cf80-da6f-11ea-91ee-949572ec39e3.png)
 
@@ -31,7 +35,7 @@ NAME : JAVA_OPTIONS
 VALUE : -Djavax.net.ssl.trustStorePassword=changeit -Djavax.net.ssl.trustStore=/externalfilesca/cacerts
 ```
 ```ruby
-oc set env deployment/python JAVA_OPTIONS="-Djavax.net.ssl.trustStorePassword=changeit -Djavax.net.ssl.trustStore=/externalfilesca/cacerts"
+oc set env dc/<DC-NAME> JAVA_OPTIONS="-Djavax.net.ssl.trustStorePassword=changeit -Djavax.net.ssl.trustStore=/externalfilesca/cacerts"
 ```
 ![image](https://user-images.githubusercontent.com/3519706/89736338-59bdec00-da71-11ea-92ce-ca8b8bb049c5.png)
 
