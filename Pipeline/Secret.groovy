@@ -4,13 +4,13 @@ pipeline {
 
     //Parameters
     parameters {
-        string(name: 'PROJECT_NAME', defaultValue: '', description: 'Proje Adi')
-        string(name: 'APP_NAME', defaultValue: '', description: 'Uygulama Adi (ör: cbot ) ')
-        string(name: 'SECRET_NAME', defaultValue: '', description: 'Secret Adi (ör: db2auth ) ')
-        string(name: 'KEY1', defaultValue: '', description: 'KEY (ör: username )') 
-        string(name: 'VALUE1', defaultValue: '', description: 'VALUE (ör: admin )')
-        string(name: 'KEY2', defaultValue: '', description: 'KEY (ör: password )') 
-        string(name: 'VALUE2', defaultValue: '', description: 'VALUE (ör: 123 )') 
+        string(name: 'PROJECT_NAME', defaultValue: '', description: 'Project Name')
+        string(name: 'APP_NAME', defaultValue: '', description: 'Application Name')
+        string(name: 'SECRET_NAME', defaultValue: '', description: 'Secret Name ( db2auth ) ')
+        string(name: 'KEY1', defaultValue: '', description: 'KEY ( username )') 
+        string(name: 'VALUE1', defaultValue: '', description: 'VALUE ( admin )')
+        string(name: 'KEY2', defaultValue: '', description: 'KEY ( password )') 
+        string(name: 'VALUE2', defaultValue: '', description: 'VALUE ( 123 )') 
     }
 
     stages{        
@@ -34,14 +34,14 @@ pipeline {
                                              {
                                                 if (params.VALUE2.isEmpty())
                                                    {
-                                                    error('Value2 Alani Boş')
+                                                    error('Value2 Empty')
                                                    }
-                                             }else{error('Key2 Alani Boş')}           
-                                        }else{error('Value1 Alani Boş')}                    
-                                    }else{error('Key1 Alani Boş')}                      
-                            }else{error('Secret Alani Boş')}
-                        }else{error('Uygulama Alani Boş')}
-                    }else{error('Proje Alani Boş')}                              
+                                             }else{error('Key2 Empty')}           
+                                        }else{error('Value1 Empty')}                    
+                                    }else{error('Key1 Empty')}                      
+                            }else{error('Secret Empty')}
+                        }else{error('Application Empty')}
+                    }else{error('Project Empty')}                              
                 }
             }    
         }
@@ -53,7 +53,7 @@ pipeline {
 									sh '''
 										project_name=`echo "${PROJECT_NAME}" | tr '[:upper:]' '[:lower:]'`
 										app_name=`echo "${APP_NAME}" | tr '[:upper:]' '[:lower:]'`
-										APP=$(if [[ $(oc get deployment ${APP_NAME} -n $project_name | wc -l) -gt 0 ]]; then echo "deployment"; elif [[ $(oc get dc ${APP_NAME} -n $project_name  | wc -l) -gt 0 ]]; then echo "dc"; else echo "Uygulama Bulunamadı"; exit 1 ; fi)
+										APP=$(if [[ $(oc get deployment ${APP_NAME} -n $project_name | wc -l) -gt 0 ]]; then echo "deployment"; elif [[ $(oc get dc ${APP_NAME} -n $project_name  | wc -l) -gt 0 ]]; then echo "dc"; else echo "Application Not Found"; exit 1 ; fi)
 										oc login https://api.hb.oc.local:6443 --username=${MY_USER} --password=${MY_PASS} --insecure-skip-tls-verify=true
 										
 										if [ $(oc get project "${PROJECT_NAME}" | wc -l) -gt 0 ]; then
@@ -72,11 +72,11 @@ pipeline {
 												oc rollout status ${APP}/${APP_NAME} -n ${PROJECT_NAME} --watch
 												
 											else
-												echo "Deployment $APP_NAME Bulunamadi"
+												echo "Deployment $APP_NAME Not Found"
 												exit 3
 											fi
 										else
-											echo "Proje $PROJECT_NAME Bulunamadi"
+											echo "Proje $PROJECT_NAME Not Found"
 											exit 2
 										fi
 									'''
