@@ -4,12 +4,12 @@ pipeline {
 
     //Parameters
     parameters {
-        string(name: 'PROJECT_NAME', defaultValue: '', description: 'Proje Adi')
-        string(name: 'APP_NAME', defaultValue: '', description: 'Uygulama Adi (ör: cbot ) ')
-        string(name: 'Mount_Address', defaultValue: '', description: 'Mount Edilecek Dizin (ör: /data )')
-        string(name: 'FILE_NAME', defaultValue: '', description: 'Dosya Adi (ör: application.properties )')
-        string(name: 'CONFIG_NAME', defaultValue: '', description: 'ConfigMap Adi (ör: myconfig )') 
-        text(name: 'VARIABLES', defaultValue: '', description: 'Değişkenleri Giriniz') 
+        string(name: 'PROJECT_NAME', defaultValue: '', description: 'Project Name')
+        string(name: 'APP_NAME', defaultValue: '', description: 'Application Name')
+        string(name: 'Mount_Address', defaultValue: '', description: 'Mount Path ( /data )')
+        string(name: 'FILE_NAME', defaultValue: '', description: 'File Name ( application.properties )')
+        string(name: 'CONFIG_NAME', defaultValue: '', description: 'ConfigMap Name ( myconfig )') 
+        text(name: 'VARIABLES', defaultValue: '', description: 'Enter Variables') 
     }
 
     stages{        
@@ -29,12 +29,12 @@ pipeline {
                                 { 
                                     if (params.CONFIG_NAME.isEmpty())
                                     { 
-                                        error('ConfimapName Alani Boş')
+                                        error('ConfimapName Empty')
                                     }
-                                }else{error('Variable Alani Boş')}
-                            }else{error('FileName Alani Boş')}
-                        }else{error('Uygulama Alani Boş')}
-                    }else{error('Proje Alani Boş')}                              
+                                }else{error('Variable Empty')}
+                            }else{error('FileName Empty')}
+                        }else{error('Application Empty')}
+                    }else{error('Project Empty')}                              
                 }
             }    
         }
@@ -46,7 +46,7 @@ pipeline {
 									sh '''
 										project_name=`echo "${PROJECT_NAME}" | tr '[:upper:]' '[:lower:]'`
 										app_name=`echo "${APP_NAME}" | tr '[:upper:]' '[:lower:]'`
-										APP=$(if [[ $(oc get deployment ${APP_NAME} -n $project_name | wc -l) -gt 0 ]]; then echo "deployment"; elif [[ $(oc get dc ${APP_NAME} -n $project_name  | wc -l) -gt 0 ]]; then echo "dc"; else echo "Uygulama Bulunamadı"; exit 1 ; fi)
+										APP=$(if [[ $(oc get deployment ${APP_NAME} -n $project_name | wc -l) -gt 0 ]]; then echo "deployment"; elif [[ $(oc get dc ${APP_NAME} -n $project_name  | wc -l) -gt 0 ]]; then echo "dc"; else echo "Application Not Found"; exit 1 ; fi)
 										oc login https://api.hb.oc.local:6443 --username=${MY_USER} --password=${MY_PASS} --insecure-skip-tls-verify=true
 										
 										if [ $(oc get project "${PROJECT_NAME}" | wc -l) -gt 0 ]; then
@@ -66,11 +66,11 @@ pipeline {
 												oc rollout status ${APP}/${APP_NAME} -n ${PROJECT_NAME} --watch
 												
 											else
-												echo "Deployment $APP_NAME Bulunamadi"
+												echo "Deployment $APP_NAME Not Found"
 												exit 3
 											fi
 										else
-											echo "Proje $PROJECT_NAME Bulunamadi"
+											echo "Proje $PROJECT_NAME Not Found"
 											exit 2
 										fi
 									'''
