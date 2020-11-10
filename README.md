@@ -179,6 +179,9 @@ oc patch pod valid-pod --type='json' -p='[{"op": "replace", "path": "/spec/conta
 # Disable a deployment livenessProbe using a json patch with positional arrays
 oc patch deployment valid-deployment --type json -p='[{"op": "remove", "path": "/spec/template/spec/containers/0/livenessProbe"}]'
 
+# add project name on servicemeshmemberroll
+oc patch servicemeshmemberroll/default -n istio-system --type merge -p '{"spec": {"members": ["myproject"]}}'
+
 # expose a port through with a service
 oc expose deployment nginx-app --port=80 --name=nginx-http
 
