@@ -33,6 +33,11 @@ oc create secret generic db-secret \
         --from-literal=DB_Password=password123 
 ```
 ```ruby
+oc create secret generic mycert.certs \
+        --from-file=mycert.crt=/tmp/mycert.crt \
+        --from-file=mycert.key=/tmp/mycert.key
+```
+```ruby
 oc create secret docker-registry private-reg-cred \
                --docker-username=dock_user \
                --docker-password=dock_password \
