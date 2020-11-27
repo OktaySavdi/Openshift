@@ -18,6 +18,32 @@ spec:
     silver.storageclass.storage.k8s.io/requests.storage: "20Gi"
     silver.storageclass.storage.k8s.io/persistentvolumeclaims: "5"
     bronze.storageclass.storage.k8s.io/requests.storage: "0"
+---
+kind: ResourceQuota
+apiVersion: v1
+metadata:
+  name: quota
+  namespace: myproject
+spec:
+  hard:
+    limits.cpu: '10'
+    limits.memory: 10G
+    requests.cpu: ' 5'
+    requests.memory: 4Gi
+    requests.storage: 3Gi
+status:
+  hard:
+    limits.cpu: '10'
+    limits.memory: 10G
+    requests.cpu: '5'
+    requests.memory: 4Gi
+    requests.storage: 3Gi
+  used:
+    limits.cpu: '1200m'
+    limits.memory: '2Gi'
+    requests.cpu: '1200m'
+    requests.memory: '2Gi'
+    requests.storage: '0'
 ```
 
 **CLI**
