@@ -54,6 +54,14 @@ oc set env --from=secret/test-secret dc/map
 # Volume
 oc set volume rc/r1 --add --name=v1 --type=secret --secret-name='secret1' --mount-path=/data
 ```
+**Process**
+```ruby
+oc process -f /yaml/myexample.yaml --parameters
+
+oc process -f /yaml/myexample.yaml -p SERVICE_NAME=servismesh -p PROJECT=myproject -p SERVICE_PORT=8080 -p HOSTNAME=myap.com
+
+for i in `oc get projects | grep -v openshift | awk '{print $1}'`; do oc process -f /yaml/myexample.yaml -p NAMESPACE=${i} | oc create -f - ; done
+```
 **Limit - Resource**
 ```ruby
 oc set resources deployment hello-world-nginx --requests cpu=10m,memory=20Mi --limits cpu=80m,memory=100Mi
