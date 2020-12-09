@@ -286,6 +286,9 @@ nodeSelector:
 
 **Affinity**
 **Available**
+
+![image](https://user-images.githubusercontent.com/3519706/101621104-630e9380-3a26-11eb-998d-1de0965daf23.png)
+
 ```
 requiredDuringSchedulingIgnoredDuringExecution # does not assign if there is no matching node
 ```
