@@ -407,35 +407,26 @@ spec:
 nsenter -t 5436 -n -- tcpdump -i any --nn -w /host/tmp/(pod_name).pcap
 ```
 **Memory Dump**
+```ruby
+oc exec mypodname -- jcmd 1 GC.heap_dump /tmp/heap.hprof
+oc rsync mypodname:/tmp/heap.hprof /tmp/.
+oc exec mypodname  -- rm /tmp/heap.hprof 
 ```
-jcmd 1 GC.heap_dump /tmp/heap.hprof
-```
-```
-$ oc exec tomcat8-4-37683 -c tomcat8 -- jcmd 1 GC.class_histogram
-```
-```
-$ oc exec tomcat8-4-37683 -c tomcat8 -- jcmd 1 GC.heap_dump /tmp/heap.hprof \
-oc rsync tomcat8-4-37683:/tmp/heap.hprof . \
-oc exec tomcat8-4-37683 -- rm /tmp/heap.hprof
-```
-
 **Thread Dump**
+```ruby
+oc exec mypodname -- jcmd 1 Thread.print > /tmp/Threadprint.txt
+oc rsync mypodname:/tmp/heap.hprof /tmp/.
+oc exec mypodname -- rm /tmp/heap.hprof 
 ```
-jcmd 1 Thread.print
+**Garbage Collections**
+```ruby
+oc exec mypodname -- jcmd 1 GC.class_histogram > /tmp/GC_class_histogram.txt
 ```
+**Top Result**
+```ruby
+oc exec mypodname -- top -b -n 1 -H -p 1 > /tmp/top.out
 ```
-kill -3 1
-```
-```
-oc exec tomcat8-4-37683 -c tomcat8 -- jcmd 1 Thread.print
-```
-```
-oc exec tomcat8-4-37683 -c tomcat8 -- kill -3 1
-```
-**Garbage collections**
-```
-jstat -gcutil 1 10000 5 > jstat.out
-```
-```
-oc exec tomcat8-4-37683 -- jstat -gcutil 1 10000 5 > jstat.out
+**Jstat Result**
+```ruby
+oc exec mypodname -- jstat -gcutil 1 10000 5 >  /tmp/jstat.out
 ```
