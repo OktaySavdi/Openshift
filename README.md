@@ -89,7 +89,6 @@ URL="$SERVER/oapi/v1/users/~"
 
 curl -H "Authorization: Bearer $TOKEN" $URL --insecure
 ```
-
 **Rollout-Rollback**
 ```ruby
 oc rollout latest dc/example
@@ -99,6 +98,11 @@ oc rollout history deployment example
 oc rollout undo deployment example
 oc rollout history deployment example --revision=2
 oc rollout undo deployment example  --to-revision=3
+```
+**Adm**
+```ruby
+oc adm node-logs <nodeName>
+oc adm node-logs <nodeName> -u kubelet
 ```
 **skopeo**
 ```ruby
@@ -110,6 +114,8 @@ skopeo copy docker://quay.io/redhattraining/versioned-hello:v1.1 docker://quay.i
 # Use the --v flag to set a verbosity level.
 oc get pods --v=8
 
+oc get po -A -o wide --field-selector spec.nodeName=<nodeName>
+
 # Delete Evicted pods
 oc get pod  | grep Evicted | awk '{print $1}' | xargs oc delete pod
 
@@ -118,6 +124,9 @@ oc delete $(oc get pods --field-selector=status.phase=Failed -o name -n cluster-
 
 # Auto scale
 oc autoscale dc/hello --min 1 --max 10 --cpu-percent 80
+
+# Debug nodes
+oc debug nodes/<nodeName>
 
 oc config view
 oc config get-contexts                           # display list of contexts 
