@@ -12,7 +12,7 @@ oc run nginx --image nginx --replicas=1 \
 ```ruby
 oc create configmap webapp-config-map
 # file
-oc create configmap myconfig --from-file=example-files/game.properties --from-file=example-files/ui.properties
+oc create configmap myconfig --from-file=game.properties --from-file=example-files/ui.properties
 
 # Value
 oc create configmap myconfig --from-literal=special.how=very --from-literal=special.type=charm
