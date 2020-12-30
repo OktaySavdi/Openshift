@@ -88,6 +88,8 @@ TOKEN=`oc whoami --show-token`
 URL="$SERVER/oapi/v1/users/~"
 
 curl -H "Authorization: Bearer $TOKEN" $URL --insecure
+
+TOKEN=$(oc get secret $(oc get sa deploy -o jsonpath='{.secrets[0].name}') -o jsonpath='{.data.token}' | base64 --decode)
 ```
 **Rollout-Rollback**
 ```ruby
