@@ -69,6 +69,9 @@ oc set resources deployment hello-world-nginx --requests cpu=10m,memory=20Mi --l
 **Probe**
 ```ruby
 oc set probe deployment/hello-node --readiness --get-url=http://:8766/actuator/health --timeout-seconds=1 --initial-delay-seconds=15 --liveness --get-url=http://:8766/actuator/health --timeout-seconds=1 --initial-delay-seconds=15
+
+oc set probe dc/hello-node --readiness --get-url=http://:8080/health/readiness --timeout-seconds=5 --initial-delay-seconds=100 --period-seconds=20 --success-threshold=1 --failure-threshold=5 --liveness --get-url=http://:8080/health/liveness --timeout-seconds=5 --initial-delay-seconds=100 --period-seconds=20 --success-threshold=1 --failure-threshold=5
+
 ```
 **Create and add a Persistent Volume**
 ```
