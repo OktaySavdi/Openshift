@@ -38,7 +38,7 @@ spec:
 ```ruby
 oc create quota <name> --hard=count/<resource>.<group>=<quota>,count/<resource>.<group>=<quota>
 oc create quota medium --hard=requests.cpu=1000m,limits.cpu=2000m,requests.memory=200Mi,limits.memory=1G
-oc create quota test --hard=count/deployments.extensions=2,count/replicasets.extensions=4,count/pods=3,count/secrets=4
+oc create quota medium --hard=count/deployments.extensions=2,count/replicasets.extensions=4,count/pods=3,count/secrets=4
 oc create quota medium --hard=requests.cpu=1000m,limits.cpu=2000m,requests.memory=200Mi,limits.memory=1G,count/pods=3,count/deployments.extensions=2
 ```
 ```ruby
