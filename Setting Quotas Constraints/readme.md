@@ -9,6 +9,8 @@ metadata:
   name: object-counts
 spec:
   hard:
+    requests.cpu: "1000m"
+    limits.cpu: "2000m"
     pods: "3" 
     configmaps: "10" 
     persistentvolumeclaims: "4" 
@@ -17,7 +19,6 @@ spec:
     services: "10"
     silver.storageclass.storage.k8s.io/requests.storage: "20Gi"
     silver.storageclass.storage.k8s.io/persistentvolumeclaims: "5"
-    bronze.storageclass.storage.k8s.io/requests.storage: "0"
 ---
 kind: ResourceQuota
 apiVersion: v1
