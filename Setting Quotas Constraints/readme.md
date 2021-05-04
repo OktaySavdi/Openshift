@@ -36,8 +36,8 @@ spec:
 **CLI**
 ```ruby
 oc create quota <name> \
-
 --hard=count/<resource>.<group>=<quota>,count/<resource>.<group>=<quota>
+
 oc create quota test \
 --hard=count/deployments.extensions=2,count/replicasets.extensions=4,count/pods=3,count/secrets=4
 ```
