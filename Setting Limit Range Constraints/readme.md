@@ -19,6 +19,27 @@ spec:
       memory: 256Mi
     type: Container
 ```
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: limit-profiles
+spec:
+  limits:
+  - max:
+      cpu: "800m"
+      memory: "1Gi"
+    min:
+      cpu: "100m"
+      memory: "99Mi"
+    default:
+      cpu: "700m"
+      memory: "900Mi"
+    defaultRequest:
+      cpu: "110m"
+      memory: "111Mi"
+    type: Container
+```
 ```ruby
 oc create -f limit.yaml
 kubectl get limitranges
