@@ -8,7 +8,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: clearcompletedpods-role
+  name: clear-completed-pods-role
   namespace: oktay
 rules:
 - apiGroups: [""]
@@ -18,12 +18,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: clearpods-rb
+  name: clear-pods-rb
   namespace: oktay
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: clearcompletedpods-role
+  name: clear-completed-pods-role
 subjects:
 - kind: ServiceAccount
   name: clear-job
