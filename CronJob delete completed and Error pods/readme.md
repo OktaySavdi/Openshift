@@ -50,5 +50,5 @@ spec:
             name: my-job
             command: ["sh", "-c", "oc get po | grep -E \"Completed|Error\" | awk '{print $1}' | xargs oc delete pod  --grace-period=0 --force"]
           restartPolicy: OnFailure
-  schedule: '*/1 * * * *'
+  schedule: '0 0 * * *'
 ```
