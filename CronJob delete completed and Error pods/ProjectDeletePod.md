@@ -32,8 +32,7 @@ subjects:
 apiVersion: batch/v1beta1
 kind: CronJob
 metadata:
-  creationTimestamp: null
-  name: my-job
+  name: clear-completed-job
   namespace: oktay
 spec:
   jobTemplate:
