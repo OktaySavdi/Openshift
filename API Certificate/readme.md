@@ -1,5 +1,5 @@
 
-### API Certificate
+### Openshift API Certificate
 
 - You must have a certificate for the FQDN and its corresponding private key. Each should be in a separate PEM format file.
 
