@@ -52,4 +52,5 @@ oc get co kube-apiserver -o jsonpath={.status.conditions[1].status}
 oc get project default -o=jsonpath="{.metadata.name}"
 ```
 **reference:**
+
 [+] https://docs.openshift.com/container-platform/4.7/security/certificates/api-server.html
