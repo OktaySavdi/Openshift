@@ -33,7 +33,7 @@ oc patch apiservers.config.openshift.io cluster --type=merge -p '{"spec":{"servi
 ```
 **watch the readiness of the API-server, if API-server Certificate was configured**
 ```sh
-url https://{{ api_hostname.stdout }}:6443/healthz --cacert certs/api-ca.pem
+url https://$api_hostname:6443/healthz --cacert certs/api-ca.pem
 ```
 **Update the client kubeconfig with the CA, if API-server Certificate was configured**
 ```sh
