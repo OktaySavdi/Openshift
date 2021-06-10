@@ -40,7 +40,7 @@ oc set env dc/<DC-NAME> JAVA_OPTIONS="-Djavax.net.ssl.trustStorePassword=changei
 ![image](https://user-images.githubusercontent.com/3519706/89736338-59bdec00-da71-11ea-92ce-ca8b8bb049c5.png)
 
 Pods > **Select Pod** > Terminals
-
+```ruby
 keytool -list -keystore /externalfilesca/cacerts -storepass changeit
-
+```
 ![image](https://user-images.githubusercontent.com/3519706/89736406-dc46ab80-da71-11ea-8c48-1d00a6745247.png)
