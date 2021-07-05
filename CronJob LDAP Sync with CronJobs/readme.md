@@ -43,6 +43,7 @@ roleRef:
 ---
 apiVersion: v1
 data:
+  bindPassword: < MY_LDAP_USER_PASSWORD - base64>
   ca.crt: SUZJQ0SDKFHDFPRUGFFJVNCVERGHREGHFKDJVNHFGOREGKJVBKDVHBEIBVEKFURS
 kind: Secret
 metadata:
@@ -62,7 +63,8 @@ data:
     apiVersion: v1
     url: ldap://ad.example.com:389
     bindDN: CN=user-ocp,OU=Users,DC=ad,DC=example,DC=com
-    bindPassword: < MY_LDAP_PASSWORD >
+    bindPassword:
+      file: /etc/secrets/bindPassword
     insecure: false
     ca: /etc/secrets/ca.crt
     rfc2307:
