@@ -289,15 +289,6 @@ tolerations:
 ```ruby
 oc taint node master node-role.kubernetes.io/master:NoSchedule-
 ```
-**Node Selector**
-```ruby
-oc label nodes node-1 size=Large
-```
-```yaml
-nodeSelector:
- size: Large
-```
-
 **Affinity**
 **Available**
 
@@ -387,30 +378,4 @@ ETCDCTL_API=3 etcdctl snapshot restore \
 --initial-cluster=master=https://127.0.0.1:2380 \
 --initial-cluster-token etcd-cluster-1 \
 --initial-advertise-peer-urls=https://127.0.0.1:2380
-```
-**Certificate**
-```ruby
-oc get csr 
-
-oc certificate approve <cert-name>
-
-oc certificate deny <cert-name>
-
-oc delete csr <cert-name>
-```
-**RBAC**
-```ruby
-oc get roles --all-namespaces
-
-oc get roles weave-net -n kube-system -o yaml
-
-oc describe rolebindings weave-net -n kube-system
-```
-**Security Context**
-```yaml
-spec:
-  securityContext:
-    runAsUser: 1000
-    runAsGroup: 3000
-    fsGroup: 2000
 ```
