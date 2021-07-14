@@ -10,7 +10,7 @@ oc get namespace --field-selector=metadata.name="openshift-operators-redhat"  -o
 oc get namespace --field-selector=metadata.name="openshift-operators-redhat"  -o=jsonpath="{.items[*]['metadata.name']}"
 ```
 **Create the elasticsearch operator namespace, if it was not found**
-```bash
+```yaml
 cat <<EOF | oc create -f -
 apiVersion: v1
 kind: Namespace
@@ -35,7 +35,7 @@ oc get namespace --field-selector=metadata.name="openshift-operators-redhat"  -o
 oc get subscription --field-selector=metadata.name="elasticsearch-operator" -o=jsonpath="{.items[*]['metadata.name']}" -n openshift-operators-redhat
 ```
 **Create the elasticsearch operator subscription, if it was not found**
-```bash
+```yaml
 cat <<EOF | oc create -f -
 apiVersion: v1
 kind: Namespace
@@ -60,7 +60,7 @@ oc get clusterserviceversions.operators.coreos.com --all-namespaces | grep -i su
 oc get operatorgroup --field-selector=metadata.name="cluster-logging"  -o=jsonpath="{.items[*]['metadata.name']}" -n openshift-logging
 ```
 **Create the cluster logging operator group, if it was not found**
-```bash
+```yaml
 cat <<EOF | oc create -f -
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
@@ -81,7 +81,7 @@ oc get operatorgroup --field-selector=metadata.name="openshift-operators-redhat"
 oc get subscription --field-selector=metadata.name="cluster-logging" -o=jsonpath="{.items[*]['metadata.name']}" -n openshift-logging
 ```
 **Create the cluster logging operator subscription, if it was not found**
-```bash
+```yaml
 cat <<EOF | oc create -f -
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
@@ -108,7 +108,7 @@ oc get clusterserviceversions.operators.coreos.com --all-namespaces | grep -i su
 oc get clusterloggings.logging.openshift.io --field-selector=metadata.name=instance -o=jsonpath="{.items[*]['metadata.name']}" -n openshift-logging
 ```
 **Create the cluster logging operator subscription, if it was not found**
-```bash
+```yaml
 cat <<EOF | oc create -f -
 apiVersion: "logging.openshift.io/v1"
 kind: "ClusterLogging"
