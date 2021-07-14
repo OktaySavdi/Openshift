@@ -22,11 +22,11 @@ metadata:
     openshift.io/cluster-monitoring: "true"
 EOF
 ```
-** Check the creation of the elasticsearch operator namespace, if it was not found**
+**Check the creation of the elasticsearch operator namespace, if it was not found**
 ```bash
 oc get namespace --field-selector=metadata.name="openshift-operators-redhat"  -o=jsonpath="{.items[*]['metadata.name']}" -n openshift-operators-redhat
 ```
-** Check the creation of the elasticsearch operator namespace, if it was not found**
+**Check the creation of the elasticsearch operator namespace, if it was not found**
 ```bash
  oc get namespace --field-selector=metadata.name="openshift-logging"  -o=jsonpath="{.items[*]['metadata.name']}" -n openshift-operators-redhat
 ```
