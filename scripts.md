@@ -27,7 +27,7 @@ oc get secret my-cache-cluster-cert-secret -n oktay -o jsonpath='{.data.tls\.crt
 ### Delete Evicted Pod
 ```sh
 oc get po | grep Evicted | awk '{print $1}' | xargs oc delete po --grace-period=0 --force
-oc get pod -A  | awk '{if ($4=="Evicted") print "oc delete pod " $2 " -n " $1;}' | sh 
+oc get pod -A --no-headers | grep -v openshift | awk '{if ($4=="Failed" || $4=="Completed") print "oc delete pod " $2 " -n " $1;}' | sh 
 ```
 ### Delete HPA
 ```sh
