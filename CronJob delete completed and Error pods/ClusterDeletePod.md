@@ -46,7 +46,7 @@ spec:
           containers:
           - image: "registry.redhat.io/openshift4/ose-cli:v4.7"
             name: my-job
-            command: ["sh", "-c", "oc get pod -A --no-headers | grep -v openshift | awk '{if ($4==\"Failed\" || $4==\"Completed\") print \"oc delete pod \" $2 \" -n \" $1;}' | sh"]
+            command: ["sh", "-c", "oc get pod -A --no-headers | grep -v openshift | awk '{if ($4==\"Error\" || $4==\"Completed\") print \"oc delete pod \" $2 \" -n \" $1;}' | sh"]
           restartPolicy: OnFailure
   schedule: '0 0 * * *'
 ```
