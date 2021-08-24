@@ -122,3 +122,10 @@ while read -r i;do for dci in $(oc get dc -n $i --no-headers | awk '{print $1}')
 oc get project --no-headers  | grep -v openshift | awk '{print $1}'  > config
 while read -r line;do oc scale $(oc get dc -o name -n $line | awk '{print $1}' | grep -v "2") --replicas=0 -n $line;done < "config"
 ```
+
+```sh
+for cluster in $(get_clusters); do
+eval ${cluster}
+for i in $(oc get projects --no-headers | grep -vE "openshift|kube" | grep -E "lab|dev|qa|prod|test" | awk '{print $1}'); do oc adm policy add-role-to-group edit "my-mail groupname" -n $i;done
+done
+```
