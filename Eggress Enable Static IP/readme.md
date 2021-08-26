@@ -57,3 +57,7 @@ oc patch netnamespace upy --type=merge -p '{"egressIPs": ["192.168.1.100"]}'
 ```ruby
 oc get netnamespace upy
 ```
+6- Delete Egres IP which set on namespace
+```ruby
+oc patch netnamespace oktay-prod --type json -p '[{ "op": "remove", "path": "/egressIPs" }]'
+```
