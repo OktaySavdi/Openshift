@@ -16,8 +16,7 @@ apiVersion: security.openshift.io/v1
 defaultAddCapabilities: null
 fsGroup:
   type: MustRunAs
-groups:
-- system:authenticated
+groups: [] #we delete this, otherwise every user gets this scc and the pod cannot be created.
 kind: SecurityContextConstraints
 metadata:
   name: nfs
