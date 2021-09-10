@@ -95,3 +95,11 @@ subjects:
 EOF
 ```
 
+Create a sample application that starts up a basic image using the my-special-pod service account which should enable the pod to run as the designated user ID.
+```sh
+oc run my-special-pod --image=quay.io/oktaysavdi/istioproject --serviceaccount=batch-scc-sa --command -- /bin/bash -c 'while true; do sleep 3; done'
+```
+#check which policy it received
+```sh
+oc get pod my-special-pod -o jsonpath="{.metadata.annotations['openshift\.io/scc']}"
+```
