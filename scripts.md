@@ -29,6 +29,10 @@ oc get secret my-cache-cluster-cert-secret -n oktay -o jsonpath='{.data.tls\.crt
 oc get po | grep Evicted | awk '{print $1}' | xargs oc delete po --grace-period=0 --force
 oc get pod -A --no-headers | grep -v openshift | awk '{if ($4=="Failed" || $4=="Completed") print "oc delete pod " $2 " -n " $1;}' | sh 
 ```
+### Delete InvalidHost Route
+```sh
+oc get route -A --no-headers | awk '{if ($3=="InvalidHost") print "oc delete route " $2 " -n " $1;}' | sh
+```
 ### Delete HPA
 ```sh
 oc get hpa -A --no-headers | awk '{print $1}' | sort | uniq > config
