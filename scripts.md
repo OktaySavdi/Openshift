@@ -1,3 +1,7 @@
+### find the active master/etcd host
+```sh
+oc get cm kube-controller-manager -o yaml -n kube-system
+```
 ### Check cluster URL
 ```sh
 oc config view --minify -o jsonpath='{.clusters[0].cluster.server}'
