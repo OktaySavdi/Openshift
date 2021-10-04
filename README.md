@@ -350,32 +350,3 @@ oc import-image quay.io/oktaysavdi/versioned-hello:latest --confirm --scheduled
 
 oc set triggers deployment/versioned-hello --from-image versioned-hello:latest -c hello
 ```
-**Backup**
-```ruby
-ETCDCTL_API=3 etcdctl snapshot save \
-/tmp/snapshot-pre-boot.db \
---endpoints=https://[127.0.0.1]:2379 \
---cacert=/etc/kubernetes/pki/etcd/ca.crt \
---cert=/etc/kubernetes/pki/etcd/server.crt \
---key=/etc/kubernetes/pki/etcd/server.key
-```
-```ruby
-ETCDCTL_API=3 etcdctl member list \
---endpoints=https://[127.0.0.1]:2379 \
---cacert=/etc/kubernetes/pki/etcd/ca.crt \
---cert=/etc/kubernetes/pki/etcd/server.crt \
---key=/etc/kubernetes/pki/etcd/server.key
-```
-**Restore**
-```ruby
-ETCDCTL_API=3 etcdctl snapshot restore \
-/tmp/snapshot-pre-boot.db \
---endpoints=https://[127.0.0.1]:2379 \
---cacert=/etc/kubernetes/pki/etcd/ca.crt \
---name=master --cert=/etc/kubernetes/pki/etcd/server.crt \
---key=/etc/kubernetes/pki/etcd/server.key \
---data-dir /var/lib/etcd-from-backup \
---initial-cluster=master=https://127.0.0.1:2380 \
---initial-cluster-token etcd-cluster-1 \
---initial-advertise-peer-urls=https://127.0.0.1:2380
-```
