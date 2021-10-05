@@ -46,6 +46,10 @@ while read -r i ; do  for item in `oc get hpa --no-headers -n $i | awk '{print $
 ```sh
 for ns in $(oc get ns -o custom-columns=NAME:.metadata.name | grep -v NAME | grep dev | grep -v openshift); do oc -n ${ns} get dc -o custom-columns=NAME:.metadata.name,NS:.metadata.namespace,DESIRED:.status.replicas,AVAILABLE:.status.availableReplicas | grep 0;done
 ```
+### Disable Selfprovisioner
+```
+oc annotate clusterrolebinding.rbac self-provisioner 'rbac.authorization.kubernetes.io/autoupdate=false' --overwrite
+```
 ### Events list to time
 ```sh
 oc get events --sort-by='.metadata.creationTimestamp'
