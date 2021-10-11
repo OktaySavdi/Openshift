@@ -139,14 +139,6 @@ oc config current-context                        # display the current-context
 oc config use-context my-cluster-name            # set the default context to my-cluster-name
 oc config set-context --current --namespace=MyNS # permanently save the namespace for all subsequent oc commands in that context.
 
-# Get commands with basic output
-oc get services                          # List all services in the namespace
-oc get pods --all-namespaces             # List all pods in all namespaces
-oc get pods -o wide                      # List all pods in the current namespace, with more details
-oc get deployment my-dep                 # List a particular deployment
-oc get pods                              # List all pods in the namespace
-oc get pod my-pod -o yaml                # Get a pod's YAML
-
 # List Services Sorted by Name
 oc get services --sort-by=.metadata.name
 
@@ -235,6 +227,8 @@ kuconfig view --kubeconfig=my-kube-config -o jsonpath="{.users[*].name}"
 oc get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}'
 
 oc get secret elasticsearch-es-elastic-user -o=jsonpath='{.data.elastic}' | base64 --decode
+
+oc get pods -A -o jsonpath='{range .items[*]}''{.metadata.namespace} {.metadata.creationTimestamp}{"\n"}'
 
 oc config view --kubeconfig=my-kube-config -o jsonpath="{.contexts[?(@.context.user=='aws-user')].name}"
 
