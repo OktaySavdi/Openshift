@@ -1,0 +1,152 @@
+---
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: cilium
+users:
+- system:serviceaccount:cilium:cilium
+allowPrivilegeEscalation: true
+allowPrivilegedContainer: true
+defaultAddCapabilities: null
+requiredDropCapabilities: null
+allowedCapabilities:
+- NET_ADMIN
+- SYS_MODULE
+allowedUnsafeSysctls: null
+allowHostNetwork: true
+volumes:  
+- hostPath
+- configMap
+- secret
+priority: null
+readOnlyRootFilesystem: false
+allowHostDirVolumePlugin: true
+allowHostIPC: false
+allowHostPID: false
+allowHostPorts: false
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  type: RunAsAny
+seccompProfiles: null
+supplementalGroups:
+  type: RunAsAny
+fsGroup:
+  type: RunAsAny
+---
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: cilium-operator
+users:
+- system:serviceaccount:cilium:cilium-operator
+allowPrivilegeEscalation: false
+allowPrivilegedContainer: false
+defaultAddCapabilities: null
+requiredDropCapabilities: null
+allowedCapabilities: null
+allowedUnsafeSysctls: null
+allowHostNetwork: true
+volumes:  
+- configMap
+- secret
+priority: null
+readOnlyRootFilesystem: false
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostPID: false
+allowHostPorts: false
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  type: RunAsAny
+seccompProfiles: null
+supplementalGroups:
+  type: RunAsAny
+fsGroup:
+  type: RunAsAny
+---
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: cilium-test
+allowHostPorts: true
+allowHostNetwork: true
+users:
+  - system:serviceaccount:cilium-test:default
+priority: null
+readOnlyRootFilesystem: false
+runAsUser:
+  type: MustRunAsRange
+seLinuxContext:
+  type: MustRunAs
+volumes: null
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostPID: false
+allowPrivilegeEscalation: false
+allowPrivilegedContainer: false
+allowedCapabilities: null
+defaultAddCapabilities: null
+requiredDropCapabilities: null
+groups: null
+---
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: cilium-test
+allowHostPorts: true
+allowHostNetwork: true
+users:
+  - system:serviceaccount:cilium-test:default
+priority: null
+readOnlyRootFilesystem: false
+runAsUser:
+  type: MustRunAsRange
+seLinuxContext:
+  type: MustRunAs
+volumes: null
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostPID: false
+allowPrivilegeEscalation: false
+allowPrivilegedContainer: false
+allowedCapabilities:
+  - NET_RAW
+defaultAddCapabilities: null
+requiredDropCapabilities: null
+groups: null
+---
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: hubble-relay
+users:
+- system:serviceaccount:cilium:hubble-relay
+allowPrivilegeEscalation: false
+allowPrivilegedContainer: false
+defaultAddCapabilities: null
+requiredDropCapabilities: null
+allowedCapabilities: null
+allowedUnsafeSysctls: null
+allowHostNetwork: false
+volumes:  
+- configMap
+- hostPath
+- projected
+- secret
+priority: null
+readOnlyRootFilesystem: false
+allowHostDirVolumePlugin: true
+allowHostIPC: false
+allowHostPID: false
+allowHostPorts: false
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  type: RunAsAny
+seccompProfiles: null
+supplementalGroups:
+  type: RunAsAny
+fsGroup:
+  type: RunAsAny
