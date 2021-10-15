@@ -98,6 +98,13 @@ kubectl get pods -o custom-columns=RESTART:.metadata.name,RESTART:.status.contai
 for n in $(oc get node -oname); do echo "------ $n -------"; oc debug --quiet $n -- uptime -s; done
 or
 for i in $(oc get nodes -o wide | grep -v NAME | awk '{print $6}');do ssh core@$i sudo uptime; done
+or
+#!/bin/bash
+for ip in $(oc get nodes  -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
+do
+   echo "reboot node $ip"
+   ssh -o StrictHostKeyChecking=no core@$ip sudo shutdown -r -t 3
+done
 ```
 ### Network Policy (netpol)
 ```sh
