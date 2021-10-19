@@ -56,6 +56,7 @@ oc get events --sort-by='.metadata.creationTimestamp'
 ```
 ### Get Token
 ```sh
+oc sa get-token <my_serviceaccount>
 TOKEN=$(oc get secret $(oc get sa <my_serviceaccount> -o jsonpath='{.secrets[0].name}') -o jsonpath='{.data.token}' | base64 --decode )
 ```
 ### KubeConfig
