@@ -44,8 +44,7 @@ pipeline {
 											oc project $project_name
 											
 											if [[ $(oc get ${APP} ${APP_NAME} | wc -l) -gt 0 ]]; then
-
-												oc patch ${APP}/${APP_NAME} --patch="{\\\"spec\\\":{\\\"template\\\":{\\\"spec\\\":{\\\"containers\\\":[{\\\"name\\\": \\\"${image_name}\\\", \\\"image\\\":\\\"${IMAGE_NAME}\\\"}]}}}}"
+												oc patch ${APP}/${APP_NAME} -n ${project_name} --patch="{\\"spec\\":{\\"template\\":{\\"spec\\":{\\"containers\\":[{\\"name\\":\\"${image_name}\\",\\"image\\": \\"${IMAGE_NAME}\\" } ]}}}}"
 												oc rollout status ${APP}/${APP_NAME} -n ${PROJECT_NAME} --watch		
 
 											else
