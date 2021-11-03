@@ -121,6 +121,10 @@ oc get images.config.openshift.io cluster -o jsonpath='{.status.internalRegistry
 ```sh
 oc set probe dc/api-gateway --readiness --get-url=http://:8080/management/health/readiness --timeout-seconds=5 --initial-delay-seconds=180 --period-seconds=20 --success-threshold=1 --failure-threshold=5 --liveness --get-url=http://:8080/management/health/liveness --timeout-seconds=5 --initial-delay-seconds=180 --period-seconds=20 --success-threshold=1 --failure-threshold=5
 ```
+# Project creation template
+```
+oc get template project-request -n openshift-config -o yaml
+```
 ### Route invalid 
 ```sh
 for i in `oc get routes -A | grep InvalidHost | awk '{print "oc -n " $1 " get route " $2}'`;do sh -c "$i";done
