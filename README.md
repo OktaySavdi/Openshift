@@ -130,6 +130,9 @@ oc delete $(oc get pods --field-selector=status.phase=Failed -o name -n cluster-
 # Auto scale
 oc autoscale dc/hello --min 1 --max 10 --cpu-percent 80
 
+# project creation template
+oc get template project-request -n openshift-config -o yaml
+
 # Debug nodes
 oc debug nodes/<nodeName>
 
