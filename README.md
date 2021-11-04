@@ -25,6 +25,9 @@ oc set volume dc/<DC-NAME> -t configmap --name trusted-ca --add --read-only=true
 # Env
 oc set env --from=configmap/deneme dc/map
 
+# Get Data
+oc extract configmap/<CONFIGMAP-NAME> -n openshift-config --confirm
+
 # Add Data
 oc set data configmap <CONFIGMAP-NAME> --from-file ca-bundle.crt=<PATH-TO-NEW-CERTIFICATE> -n openshift-config
 ```
