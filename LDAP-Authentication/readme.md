@@ -38,7 +38,7 @@ spec:
     ldap: 
       attributes: 
         id: 
-        - sAMAccountName 
+        - dn 
         email: 
         - mail 
         name: 
