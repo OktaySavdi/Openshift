@@ -2,6 +2,10 @@
 ```sh
 oc get cm kube-controller-manager -o yaml -n kube-system
 ```
+### find ip addres in node
+```sh
+for i in $(oc get nodes -o wide | grep infra | awk '{print $6}'); do ssh core@$i 'sudo ip a | grep 10.10.10.10',echo $i; done
+```
 ### Check cluster URL
 ```sh
 oc config view --minify -o jsonpath='{.clusters[0].cluster.server}'
