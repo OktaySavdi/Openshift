@@ -16,7 +16,7 @@ The smallest OpenShift Container Platform clusters require the following hosts:
 The bootstrap, control plane, and compute machines must use the Red Hat Enterprise Linux CoreOS (RHCOS) as the operating system.
 
 **hostnames**  
-```json
+```shell
 <_IP1_> http.hb.oc.local  
 <_IP2_> lb.hb.oc.local 
 <_IP3_> master-01.hb.oc.local 
@@ -52,7 +52,7 @@ yum install dnsmasq -y
 ```  
 
 configure /etc/hosts
-```json
+```shell
 192.168.10.1 lb.oc.local
 192.168.10.2 master-01.hb.oc.local
 192.168.10.3 master-02.hb.oc.local
@@ -69,7 +69,7 @@ configure /etc/hosts
 ``` 
   
 open firewall
-```json
+```shell
 firewall-cmd --permanent --add-port=53/tcp
 firewall-cmd --permanent --add-port=53/udp
 firewall-cmd --reload
@@ -78,7 +78,7 @@ configure dnsmasq
 
     vi /etc/dnsmasq.d/oc.conf
 
-```json
+```shell
 domain=oc.local
 
 server=/10.168.192.in-addr.arpa/192.168.10.1
