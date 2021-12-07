@@ -132,7 +132,7 @@ Configure haproxy
 vi /etc/haproxy/haproxy.cfg
 ```
 SampleHAproxyCFG
-```json
+```shell
 #---------------------------------------------------------------------
 # main frontend which proxys to the kube-api-server-6443
 #---------------------------------------------------------------------
