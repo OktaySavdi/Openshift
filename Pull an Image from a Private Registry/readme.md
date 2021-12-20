@@ -66,3 +66,21 @@ spec:
   imagePullSecrets:
   - name: regcred
 ```
+or
+
+Another way of creating the secret is to use the authentication token from the podman login
+command:
+```
+[user@host ~]$ oc create secret generic registrycreds \
+--from-file .dockerconfigjson=${XDG_RUNTIME_DIR}/containers/auth.json \
+--type kubernetes.io/dockerconfigjson
+```
+You then link the secret to the default service account from your project:
+```
+[user@host ~]$ oc secrets link default registrycreds --for pull
+```
+To use the secret to access an S2I builder image, link the secret to the builder service account
+from your project:
+```
+[user@host ~]$ oc secrets link builder registrycreds
+```
