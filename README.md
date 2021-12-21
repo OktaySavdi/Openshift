@@ -246,6 +246,9 @@ oc get deployment -n openshift-cluster-samples-operator cluster-samples-operator
 oc get deployment -n openshift-cluster-samples-operator cluster-samples-operator -o jsonpath='{.spec.template.spec.containers[0].name}'
 
 oc get deployment -n openshift-cluster-samples-operator cluster-samples-operator -o jsonpath='{.status.conditions[?(@.type=="Available")].status}'
+
+# get imagepullpolicy
+oc get deploy --no-headers -A -o jsonpath='{range .items[*]}''NS:{.metadata.namespace}{"\t"}APP:{.metadata.name}{"\t"}UnavailableReplicas:{.status.unavailableReplicas}{"\t"}''image:{.spec.template.spec.containers[*].image}{"\t"}Policy:{.spec.template.spec.containers[*].imagePullPolicy}{"\n"}'
 ```
 **Cluster**
 ```ruby
