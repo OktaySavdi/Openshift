@@ -20,6 +20,8 @@ oc create configmap myconfig --from-literal=special.how=very --from-literal=spec
 # Volume
 oc set volume dc/map --add --name=v1 --type=configmap --configmap-name='myconfig' --mount-path=/data
 
+oc set volumes deployment/example-application --add --name example-storage --type pvc --claim-class nfs-sc --claim-mode rwo --claim-size 15Gi --mount-path /var/lib/example-app --claim-name example-storage
+
 oc set volume dc/<DC-NAME> -t configmap --name trusted-ca --add --read-only=true --mount-path /etc/pki/ca-trust/extracted/pem --configmap-name <CONFIGMAP-NAME>
 
 # Env
@@ -57,6 +59,9 @@ oc create secret generic test-secret --from-literal=username='my-app' --from-lit
 # Env
 oc set env --from=secret/test-secret dc/map
 
+# Extract
+oc extract secret/htpasswd-secret -n openshift-config --to /tmp/ --confirm /tmp/htpasswd
+
 # Volume
 oc set volume rc/r1 --add --name=v1 --type=secret --secret-name='secret1' --mount-path=/data
 ```
@@ -77,7 +82,6 @@ oc set resources deployment hello-world-nginx --requests cpu=10m,memory=20Mi --l
 oc set probe deployment/hello-node --readiness --get-url=http://:8766/actuator/health --timeout-seconds=1 --initial-delay-seconds=15 --liveness --get-url=http://:8766/actuator/health --timeout-seconds=1 --initial-delay-seconds=15
 
 oc set probe dc/hello-node --readiness --get-url=http://:8080/health/readiness --timeout-seconds=5 --initial-delay-seconds=100 --period-seconds=20 --success-threshold=1 --failure-threshold=5 --liveness --get-url=http://:8080/health/liveness --timeout-seconds=5 --initial-delay-seconds=100 --period-seconds=20 --success-threshold=1 --failure-threshold=5
-
 ```
 **Create and add a Persistent Volume**
 ```
@@ -110,16 +114,68 @@ oc rollout undo deployment example
 oc rollout history deployment example --revision=2
 oc rollout undo deployment example  --to-revision=3
 ```
+**Policy**
+```ruby
+oc adm policy who-can delete user
+
+oc adm policy add-scc-to-user anyuid -z oktay
+
+oc adm policy add-cluster-role-to-user cluster-admin student
+oc adm policy add-cluster-role-to-group edit mygroup
+
+oc adm policy remove-cluster-role-from-user cluster-admin student
+oc adm policy remove-cluster-role-from-group self-provisioner system:authenticated:oauth
+```
+**Adm**
+```ruby
+oc adm create-bootstrap-project-template -o yaml > /tmp/project-template.yaml
+oc create -f /tmp/project-template.yaml -n openshift-config
+oc get template -n openshift-config
+
+oc edit projects.config
+spec:
+  projectRequsestTemplate:
+    name: project-request
+```
 **Adm**
 ```ruby
 oc adm node-logs <nodeName>
 oc adm node-logs <nodeName> -u kubelet
 ```
+**Groups**
+```ruby
+oc adm groups new dev-group
+oc adm groups add-users dev-group developer
+
+oc adm groups new qa-group
+oc adm groups add-users qa-group qa-engineer
+```
 **skopeo**
 ```ruby
 skopeo copy docker://quay.io/redhattraining/versioned-hello:v1.1 docker://quay.io/oktaysavdi/versioned-hello:latest
 ```
+**Quota**
+```ruby
+oc describe quota dev-quota
+oc create quota dev-quota --hard services=10,cpu=1300,memory=1.5Gi
 
+oc create clusterquota user-qa --project-annotation-selector openshift.io/requester=qa --hard pods=12,secrets=20
+oc create clusterquota env-qa --project-label-selector environment=qa --hard pods=10,services=5
+```
+**Service Account**
+```ruby
+oc create serviceaccount <service-account-name>
+oc get pod/gitlab-7dc4b9898d-glszn -o yaml | oc adm policy scc-subject-review -f -
+oc adm policy add-scc-to-user anyuid -z <service-account-name>
+oc set serviceaccount deployment web <service-account-name>
+```
+**Route**
+```ruby
+oc expose service api-frontend --hostname api.apps.acme.com
+oc create route edge --service api-frontend --hostname api.apps.acme.com --key api.key --cert api.crt
+oc create route edge todo-https --service todo-http --hostname todo-https.apps.ocp4.example.com
+oc create route passthrough todo-https --service todo-https --port 8443 --hostname todo-https.apps.ocp4.example.com
+```
 **Cheat Sheet**
 ```ruby
 # Use the --v flag to set a verbosity level.
@@ -141,6 +197,9 @@ oc get template project-request -n openshift-config -o yaml
 
 # Debug nodes
 oc debug nodes/<nodeName>
+
+# Debug app
+oc debug deployment/my-deployment-name --as-root
 
 oc config view
 oc config get-contexts                           # display list of contexts 
