@@ -399,6 +399,17 @@ oc run --restart=Never --image=busybox:1.28.4 \
             static-busybox --dry-run -o yaml \ 
             --command -- sleep 1000 > /etc/kubernetes/manifests/static-busybox.yaml
 ```
+**ETCD**
+```
+for pod in $(oc -n openshift-etcd get pod -o name -l app=etcd); do echo "${pod}:"; oc -n openshift-etcd rsh -c etcdctl ${pod} etcdctl endpoint health; echo; done
+
+oc project openshift-etcd
+oc rsh <etcd-pod-name>
+
+etcdctl member list -w table
+etcdctl endpoint health --cluster
+etcdctl endpoint status -w table
+```
 **Upgrade**
 ```ruby
 oc drain node01 --ignore-daemonsets --force  > takes maintenance mode. deletes every pod on it
