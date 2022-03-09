@@ -409,6 +409,11 @@ oc rsh <etcd-pod-name>
 etcdctl member list -w table
 etcdctl endpoint health --cluster
 etcdctl endpoint status -w table
+etcdctl get / --prefix --keys-only | sed '/^$/d' | cut -d/ -f3 | sort | uniq -c | sort -rn
+
+#on node
+crictl exec -it $(crictl ps | grep etcdctl | awk '{print $1}') /bin/sh
+etcdctl member list -w table
 ```
 **Upgrade**
 ```ruby
