@@ -98,6 +98,10 @@ while read -r line;do oc get dc -o name -n $line | grep -Ev "v1|v2|v3|v0|v4";don
 ```sh
 kubectl get pods -o custom-columns=RESTART:.metadata.name,RESTART:.status.containerStatuses[*].restartCount,STATUS:.status.phase,IP:.status.podIP,NODE:.spec.nodeName,IMAGE:.spec.containers[*].image,ContainerName:.spec.containers[*].name --sort-by=.metadata.creationTimestamp
 ```
+### Node date
+```bash
+for  i in `oc get nodes --no-headers -o wide | awk '{print $6}'`; do ssh core@${i} date; done
+```
 ### Node reboot time
 ```sh
 for n in $(oc get node -oname); do echo "------ $n -------"; oc debug --quiet $n -- uptime -s; done
