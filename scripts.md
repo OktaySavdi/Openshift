@@ -98,6 +98,12 @@ while read -r line;do oc get dc -o name -n $line | grep -Ev "v1|v2|v3|v0|v4";don
 ```sh
 kubectl get pods -o custom-columns=RESTART:.metadata.name,RESTART:.status.containerStatuses[*].restartCount,STATUS:.status.phase,IP:.status.podIP,NODE:.spec.nodeName,IMAGE:.spec.containers[*].image,ContainerName:.spec.containers[*].name --sort-by=.metadata.creationTimestamp
 ```
+### Disk Clean on Node
+```
+for i in $(crictl ps -a | grep -v CONTAINER | awk '{print $1}'); do crictl inspect $i | grep -A10 -B10 8f58bd7c87347006d19b527304335eabf9e9459a2f6a11feffcab729d1853653; done
+# podman image prune     <<<-- To remove dangling images OR
+# podman system prune -a --log-level debug  <<<-- To remove dangling+unused images 
+```
 ### Node date
 ```bash
 for  i in `oc get nodes --no-headers -o wide | awk '{print $6}'`; do ssh core@${i} date; done
