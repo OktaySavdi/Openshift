@@ -34,6 +34,10 @@ oc extract configmap/<CONFIGMAP-NAME> -n openshift-config --confirm
 oc set data configmap <CONFIGMAP-NAME> --from-file ca-bundle.crt=<PATH-TO-NEW-CERTIFICATE> -n openshift-config
 ```
 **secret**
+```
+oc -n harbor get secret harbor-jobservice-crt -o json -o jsonpath="{.data.tls\.crt}" | base64 -d
+oc -n harbor get secret harbor-jobservice-crt -o json -o jsonpath="{.data.tls\.key}" | base64 -d
+```
 ```ruby
 oc create secret generic db-secret \
         --from-literal=DB_HOST=sql01 \
