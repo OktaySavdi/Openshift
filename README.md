@@ -211,6 +211,18 @@ oc config current-context                        # display the current-context
 oc config use-context my-cluster-name            # set the default context to my-cluster-name
 oc config set-context --current --namespace=MyNS # permanently save the namespace for all subsequent oc commands in that context.
 
+# export kubeconfig certificate
+oc config get-users | grep os1
+oc config view --raw -o jsonpath="{.users[?(@.name=='clusterAdmin_rg-hce_os1')].user.client-certificate-data}" | base64 -d
+oc config view --raw -o jsonpath="{.users[?(@.name=='clusterAdmin_rg-hce_os1')].user.client-key-data}" | base64 -d
+
+oc config get-clusters | grep os1
+oc config view --raw -o jsonpath="{.clusters[?(@.name=='os1')].cluster.certificate-authority-data}" | base64 -d
+
+oc config view --raw --contexts=os1-admin | grep client-certificate-data  | awk '{print $2}' | base64 -d
+oc config view --raw --context=os1-admin | grep client-key-data  | awk '{print $2}' | base64 -d
+oc config view --raw --context=os1-admin | grep certificate-authority-data | awk '{print $2}' | base64 -d
+
 # List Services Sorted by Name
 oc get services --sort-by=.metadata.name
 
