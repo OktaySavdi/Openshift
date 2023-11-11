@@ -425,6 +425,7 @@ oc rsh <etcd-pod-name>
 etcdctl member list -w table
 etcdctl endpoint health --cluster
 etcdctl endpoint status -w table
+etcdctl endpoint status --write-out=table
 etcdctl get / --prefix --keys-only | sed '/^$/d' | cut -d/ -f3 | sort | uniq -c | sort -rn
 
 #on node
