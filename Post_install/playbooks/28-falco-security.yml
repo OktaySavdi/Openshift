@@ -1,0 +1,249 @@
+---
+- name: Deploy Falco Runtime Security
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+    - ../vars/vault.yml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+  pre_tasks:
+    - name: Verify falco installation is enabled
+      assert:
+        that:
+          - enable_falco | default(false) | bool
+        fail_msg: "Falco is disabled. Set enable_falco: true to proceed"
+      tags: always
+
+  tasks:
+    - name: Add Falco Helm repository
+      command: helm repo add falcosecurity https://falcosecurity.github.io/charts
+      register: helm_repo_add
+      changed_when: "'already exists' not in helm_repo_add.stderr"
+      failed_when: helm_repo_add.rc != 0 and 'already exists' not in helm_repo_add.stderr
+      tags: [install, helm]
+
+    - name: Update Helm repositories
+      command: helm repo update
+      tags: [install, helm]
+
+    - name: Create falco namespace
+      k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: falco
+      tags: [install, namespace]
+
+    - name: Create Docker registry secret for Falco
+      k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: dockerhub-secret
+            namespace: falco
+          type: kubernetes.io/dockerconfigjson
+          data:
+            .dockerconfigjson: "{{ {'auths': {'https://index.docker.io/v1/': {'username': vault_docker_username, 'password': vault_docker_password, 'auth': (vault_docker_username + ':' + vault_docker_password) | b64encode}}} | to_json | b64encode }}"
+      tags: [install, secret]
+
+    - name: Create Falco privileged SCC
+      k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/falco/falco-scc.yaml') | from_yaml }}"
+      check_mode: no
+      tags: [install, rbac, scc]
+
+    - name: Create temporary values file with production rules
+      copy:
+        dest: /tmp/falco-production-values.yaml
+        content: |
+          driver:
+            kind: modern_ebpf
+            ebpf:
+              leastPrivileged: true
+          
+          collectors:
+            docker:
+              enabled: false
+            crio:
+              enabled: true
+              socket: /run/crio/crio.sock
+          
+          tty: true
+          
+          image:
+            pullSecrets:
+              - dockerhub-secret
+          
+          # Falco configuration for production
+          falco:
+            grpc:
+              enabled: true
+            grpc_output:
+              enabled: true
+            json_output: true
+            json_include_output_property: true
+            log_level: info
+            priority: notice
+            buffered_outputs: true
+            outputs_rate: 1
+            outputs_max_burst: 1000
+          
+          falcosidekick:
+            enabled: {{ falco_sidekick_enabled | default(true) }}
+            image:
+              pullSecrets:
+                - dockerhub-secret
+            webui:
+              enabled: {{ falco_sidekick_enabled | default(true) }}
+              image:
+                pullSecrets:
+                  - dockerhub-secret
+              redis:
+                storageEnabled: true
+                image:
+                  pullSecrets:
+                    - dockerhub-secret
+          
+          # Production security rules
+          {{ lookup('file', '../templates/k8s/falco/production-rules.yaml') }}
+      tags: [install, config]
+
+    - name: Uninstall existing Falco to avoid ConfigMap conflicts
+      command: helm uninstall falco --namespace falco
+      failed_when: false
+      changed_when: false
+      tags: [install, helm]
+
+    - name: Wait for Falco resources cleanup
+      pause:
+        seconds: 10
+      tags: [install, helm]
+
+    - name: Install Falco using Helm with production rules
+      command: >
+        helm install falco falcosecurity/falco
+        --namespace falco
+        --values /tmp/falco-production-values.yaml
+      register: helm_install
+      changed_when: "'has been installed' in helm_install.stdout"
+      tags: [install, helm]
+
+    - name: Wait for Falco DaemonSet to be ready
+      command: kubectl wait pods --for=condition=Ready -l app.kubernetes.io/name=falco -n falco --timeout=180s
+      register: falco_wait
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: Fix Falcosidekick security context for OpenShift
+      when: falco_sidekick_enabled | default(true) | bool
+      command: >
+        kubectl patch deployment {{ item }} -n falco --type='json'
+        -p='[{"op": "remove", "path": "/spec/template/spec/securityContext"}]'
+      loop:
+        - falco-falcosidekick
+        - falco-falcosidekick-ui
+      register: scc_patch
+      changed_when: "'patched' in scc_patch.stdout"
+      failed_when: false
+      tags: [configure, scc]
+
+    - name: Add Docker pull secret to Falcosidekick UI deployment
+      when: falco_sidekick_enabled | default(true) | bool
+      command: >
+        kubectl patch deployment falco-falcosidekick-ui -n falco --type='json'
+        -p='[{"op": "add", "path": "/spec/template/spec/imagePullSecrets", "value": [{"name": "dockerhub-secret"}]}]'
+      register: ui_pullsecret_patch
+      changed_when: "'patched' in ui_pullsecret_patch.stdout"
+      failed_when: false
+      tags: [configure, pullsecret]
+
+    - name: Patch Redis StatefulSet to use Docker pull secret
+      when: falco_sidekick_enabled | default(true) | bool
+      command: >
+        kubectl patch statefulset falco-falcosidekick-ui-redis -n falco
+        --type='json'
+        -p='[{"op": "add", "path": "/spec/template/spec/imagePullSecrets", "value": [{"name": "dockerhub-secret"}]}]'
+      register: redis_patch
+      changed_when: "'patched' in redis_patch.stdout"
+      failed_when: false
+      tags: [configure, redis]
+
+    - name: Restart Redis pod if patched
+      when:
+        - falco_sidekick_enabled | default(true) | bool
+        - redis_patch is changed
+      command: kubectl delete pod falco-falcosidekick-ui-redis-0 -n falco --ignore-not-found=true
+      tags: [configure, redis]
+
+    - name: Give pods time to start
+      when: falco_sidekick_enabled | default(true) | bool
+      pause:
+        seconds: 30
+      tags: [verify]
+
+    - name: Get Falco pod status
+      k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: falco
+        label_selectors:
+          - "app.kubernetes.io/name=falco"
+      register: falco_pods
+      tags: [verify]
+
+    - name: Display Falco installation status
+      debug:
+        msg: |
+          Falco installation complete!
+          - Falco pods running: {{ falco_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length }}
+          - Total pods: {{ falco_pods.resources | length }}
+      tags: [verify]
+
+    - name: Create Falcosidekick UI Route (OpenShift)
+      when: falco_sidekick_enabled | default(true) | bool
+      k8s:
+        state: present
+        definition:
+          apiVersion: route.openshift.io/v1
+          kind: Route
+          metadata:
+            name: falcosidekick-ui
+            namespace: falco
+          spec:
+            to:
+              kind: Service
+              name: falco-falcosidekick-ui
+            port:
+              targetPort: http
+            tls:
+              termination: edge
+              insecureEdgeTerminationPolicy: Redirect
+      tags: [configure, route]
+
+    - name: Get Falcosidekick UI route
+      when: falco_sidekick_enabled | default(true) | bool
+      k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: falco
+        name: falcosidekick-ui
+      register: falco_ui_route
+      tags: [verify, route]
+
+    - name: Display Falcosidekick UI URL
+      when:
+        - falco_sidekick_enabled | default(true) | bool
+        - falco_ui_route.resources | length > 0
+      debug:
+        msg: |
+          Falcosidekick UI is available at:
+          https://{{ falco_ui_route.resources[0].spec.host }}
+      tags: [verify, route]

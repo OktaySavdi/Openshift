@@ -1,0 +1,201 @@
+---
+- name: Validate OpenShift prerequisites before configuration
+  hosts: localhost
+  gather_facts: true
+  vars_files:
+    - ../vars/all_vars.yaml
+  
+  tasks:
+    - name: Prerequisites validation
+      block:
+        - name: Display validation start
+          debug:
+            msg: "Starting OpenShift prerequisites validation..."
+
+        - name: Check if oc CLI is available
+          command: which oc
+          register: oc_check
+          failed_when: oc_check.rc != 0
+          changed_when: false
+          check_mode: no
+
+        - name: Get oc version
+          command: oc version --client -o json
+          register: oc_version_output
+          changed_when: false
+          check_mode: no
+
+        - name: Check KUBECONFIG environment variable
+          assert:
+            that:
+              - kubeconfig_path is defined
+              - kubeconfig_path != ""
+            fail_msg: "KUBECONFIG path must be defined in all_vars.yaml"
+
+        - name: Verify KUBECONFIG file exists
+          stat:
+            path: "{{ kubeconfig_path }}"
+          register: kubeconfig_stat
+          failed_when: not kubeconfig_stat.stat.exists
+
+        - name: Display KUBECONFIG path
+          debug:
+            msg: "KUBECONFIG: {{ kubeconfig_path }}"
+
+        - name: Test cluster connectivity
+          command: oc whoami
+          register: cluster_whoami
+          failed_when: cluster_whoami.rc != 0
+          changed_when: false
+          check_mode: no
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+
+        - name: Display authenticated user
+          debug:
+            msg: "Authenticated as: {{ cluster_whoami.stdout }}"
+
+        - name: Get OpenShift cluster version
+          shell: oc version -o json | jq -r '.openshiftVersion'
+          register: ocp_version
+          changed_when: false
+          check_mode: no
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+
+        - name: Display OpenShift version
+          debug:
+            msg: "OpenShift version: {{ ocp_version.stdout }}"
+
+        - name: Verify OpenShift version is 4.14 or higher
+          assert:
+            that: ocp_version.stdout is version('4.14', '>=')
+            fail_msg: "OpenShift version must be 4.14 or higher. Current version: {{ ocp_version.stdout }}"
+            success_msg: "OpenShift version {{ ocp_version.stdout }} is supported"
+
+        - name: Check cluster operator status
+          shell: oc get clusteroperators -o json
+          register: cluster_operators
+          changed_when: false
+          check_mode: no
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+
+        - name: Check for degraded operators
+          shell: oc get clusteroperators -o json | jq -r '.items[] | select(.status.conditions[]? | select(.type=="Degraded" and .status=="True")) | .metadata.name' | tr '\n' ',' | sed 's/,$//'
+          register: degraded_operators_output
+          changed_when: false
+          check_mode: no
+          failed_when: false
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+
+        - name: Warn about degraded operators
+          debug:
+            msg: "WARNING: The following cluster operators are degraded: {{ degraded_operators_output.stdout }}"
+          when: degraded_operators_output.stdout != ""
+
+        - name: Check for available nodes
+          shell: oc get nodes -o json
+          register: cluster_nodes
+          changed_when: false
+          check_mode: no
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+
+        - name: Count nodes
+          shell: |
+            total=$(oc get nodes --no-headers | wc -l)
+            ready=$(oc get nodes --no-headers | grep ' Ready ' | wc -l)
+            echo "total=$total,ready=$ready"
+          register: node_counts
+          changed_when: false
+          check_mode: no
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+
+        - name: Parse node counts
+          set_fact:
+            total_nodes: "{{ (node_counts.stdout.split(',')[0].split('=')[1]) | trim }}"
+            ready_nodes: "{{ (node_counts.stdout.split(',')[1].split('=')[1]) | trim }}"
+
+        - name: Display cluster node status
+          debug:
+            msg: "Cluster has {{ ready_nodes }}/{{ total_nodes }} nodes ready"
+
+        - name: Verify at least one node is ready
+          assert:
+            that: ready_nodes | int > 0
+            fail_msg: "No ready nodes found in the cluster"
+
+        - name: Check required Python modules
+          shell: python3 -c "import {{ item }}"
+          loop:
+            - kubernetes
+            - openshift
+            - yaml
+            - jinja2
+          register: python_modules
+          failed_when: false
+          changed_when: false
+          check_mode: no
+
+        - name: Verify vault.yml exists (for LDAP)
+          stat:
+            path: "{{ playbook_dir }}/../vars/vault.yml"
+          register: vault_file
+          when: enable_ldap | default(false)
+
+        - name: Warn if vault.yml is missing but LDAP is enabled
+          debug:
+            msg: "WARNING: LDAP is enabled but vault.yml not found. Run: ansible-vault create vars/vault.yml"
+          when:
+            - enable_ldap | default(false)
+            - not vault_file.stat.exists
+
+        - name: Check certificate files if cert management is enabled
+          stat:
+            path: "{{ ldap_ca_crt }}"
+          register: ldap_cert_file
+          when: enable_ldap | default(false)
+
+        - name: Warn if LDAP certificate is missing
+          debug:
+            msg: "WARNING: LDAP certificate file not found: {{ ldap_ca_crt }}"
+          when:
+            - enable_ldap | default(false)
+            - ldap_cert_file is defined
+            - not ldap_cert_file.stat.exists
+
+        - name: Display validation summary
+          debug:
+            msg:
+              - "=== Prerequisites Validation Complete ==="
+              - "✓ oc CLI installed"
+              - "✓ KUBECONFIG valid"
+              - "✓ Cluster connectivity confirmed"
+              - "✓ OpenShift version {{ ocp_version.stdout }} supported"
+              - "✓ {{ ready_nodes }}/{{ total_nodes }} nodes ready"
+              - "Ready to proceed with OpenShift configuration"
+
+      rescue:
+        - name: Display validation failure
+          debug:
+            msg: "Prerequisites validation failed: {{ ansible_failed_result.msg | default('Unknown error') }}"
+
+        - name: Fail with helpful message
+          fail:
+            msg: |
+              Prerequisites validation failed. Please address the issues above before proceeding.
+              
+              Common fixes:
+              - Ensure oc CLI is installed and in PATH
+              - Set KUBECONFIG environment variable or update kubeconfig_path in all_vars.yaml
+              - Verify cluster is running and accessible
+              - Check cluster operator health: oc get clusteroperators
+              - Ensure cluster version is 4.14 or higher
+
+      always:
+        - name: Display validation status
+          debug:
+            msg: "Prerequisites validation {{ 'passed' if ansible_failed_task is not defined else 'failed' }}"

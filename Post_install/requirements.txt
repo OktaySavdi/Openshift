@@ -1,0 +1,25 @@
+# Python dependencies for OpenShift Ansible Automation
+# Install with: pip install -r requirements.txt
+
+# Ansible
+ansible>=2.15.0
+
+# Kubernetes and OpenShift Python clients
+kubernetes>=28.0.0
+openshift>=0.13.0
+
+# Template rendering
+jinja2>=3.1.0
+
+# YAML processing
+PyYAML>=6.0
+
+# HTTP requests (for API calls)
+requests>=2.31.0
+
+# Additional utilities
+python-dateutil>=2.8.0
+
+# External Dependencies (install separately):
+# - Helm 3.x: Required for Falco deployment (brew install helm or https://helm.sh/docs/intro/install/)
+# - oc CLI: OpenShift command-line tool

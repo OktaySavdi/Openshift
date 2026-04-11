@@ -1,0 +1,101 @@
+---
+- name: Configure DNS Performance Tuning
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  
+  pre_tasks:
+    - name: Test cluster connectivity
+      command: oc whoami
+      register: cluster_test
+      changed_when: false
+  
+  tasks:
+    - name: Check if DNS Tuning Profile already exists
+      kubernetes.core.k8s_info:
+        api_version: tuned.openshift.io/v1
+        kind: Tuned
+        name: dns-tuning
+        namespace: openshift-cluster-node-tuning-operator
+      register: existing_dns_tuning
+      tags: [check, dns, tuning]
+
+    - name: Display DNS Tuning Profile status
+      debug:
+        msg: |
+          DNS Tuning Profile status:
+          - Exists: {{ 'Yes' if existing_dns_tuning.resources | length > 0 else 'No' }}
+          - Creation needed: {{ 'No' if existing_dns_tuning.resources | length > 0 else 'Yes' }}
+      tags: [check, dns, tuning]
+
+    - name: Apply DNS Tuning Profile
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/configs/machine-configs/custom-dns-tuned.yaml') | from_yaml }}"
+      when: existing_dns_tuning.resources | length == 0
+      register: dns_tuning_applied
+      tags:
+        - dns
+        - tuning
+        - performance
+        - sysctl
+
+    - name: Wait briefly for Tuned operator to process changes
+      pause:
+        seconds: 15
+      when: dns_tuning_applied is changed
+      tags: [verify, tuning]
+
+    - name: Verify DNS Tuning Profile exists
+      kubernetes.core.k8s_info:
+        api_version: tuned.openshift.io/v1
+        kind: Tuned
+        name: dns-tuning
+        namespace: openshift-cluster-node-tuning-operator
+      register: tuned_verify
+      tags: [verify, dns, tuning]
+
+    - name: Get all Tuned profiles
+      kubernetes.core.k8s_info:
+        api_version: tuned.openshift.io/v1
+        kind: Tuned
+        namespace: openshift-cluster-node-tuning-operator
+      register: all_tuneds
+      tags: [verify, dns, tuning]
+
+    - name: Display all Tuned configurations
+      debug:
+        msg: |
+          Tuned Profiles in cluster:
+          {% for tuned in all_tuneds.resources %}
+          - {{ tuned.metadata.name }}:
+              Created: {{ tuned.metadata.creationTimestamp }}
+              Profiles: {{ tuned.spec.profile | map(attribute='name') | list | join(', ') if tuned.spec.profile is defined else 'N/A' }}
+          {% endfor %}
+      tags: [verify, dns, tuning]
+
+    - name: Verify Tuned profiles are applied on nodes
+      kubernetes.core.k8s_info:
+        api_version: tuned.openshift.io/v1
+        kind: Profile
+        namespace: openshift-cluster-node-tuning-operator
+      register: tuned_profiles
+      tags: [verify, dns, tuning]
+
+    - name: Display node profile status
+      debug:
+        msg: |
+          Tuned Profile Application Status:
+          {% for profile in tuned_profiles.resources %}
+          - Node: {{ profile.metadata.name }}
+              Applied Profile: {{ profile.status.tunedProfile if profile.status.tunedProfile is defined else 'Unknown' }}
+              Status: {{ 'Applied' if profile.status.conditions is defined and (profile.status.conditions | selectattr('type', 'equalto', 'Applied') | selectattr('status', 'equalto', 'True') | list | length > 0) else 'Pending' }}
+          {% endfor %}
+          
+          Note: DNS tuning applies via node-tuning-operator without requiring node reboots.
+                The 'dns-tuning' profile will be applied to nodes matching the profile selector.
+      tags: [verify, dns, tuning]

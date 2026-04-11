@@ -1,0 +1,263 @@
+---
+- name: Configure LDAP authentication
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+    - ../vars/vault.yml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    ldap_ca_cert: "{{ ldap_ca_crt }}"
+    override_ldap_config: "{{ enable_ldap | default(true) }}"
+
+  pre_tasks:
+    - name: Verify LDAP configuration variables
+      assert:
+        that:
+          - ldap_password is defined
+          - ldap_password != ""
+          - ldap_password != "change_me"
+        fail_msg: "LDAP password must be defined and not empty or default value"
+
+    - name: Test cluster connectivity
+      shell: oc whoami
+      register: cluster_test
+      changed_when: false
+
+  tasks:
+    - name: Configure LDAP authentication
+      block:
+        - name: Check existing LDAP secret
+          shell: >
+            oc get secrets -n openshift-config 
+            --field-selector=metadata.name="{{ ldap_secret_name }}" 
+            -o=jsonpath="{.items[*]['metadata.name']}"
+          register: ldap_secret_status
+          changed_when: false
+
+        - name: Display LDAP secret status
+          debug:
+            msg: "LDAP secret status: {{ 'exists' if ldap_secret_status.stdout else 'not found' }}"
+
+        - name: Create LDAP secret
+          shell: >
+            oc create secret generic "{{ ldap_secret_name }}" 
+            --from-literal=bindPassword='{{ ldap_password }}' 
+            -n openshift-config
+          when: 
+            - ldap_secret_status.stdout == ""
+            - ldap_password is defined 
+            - ldap_password != ""
+            - ldap_password != "change_me"
+          register: ldap_secret_creation
+          no_log: true
+
+        - name: Check existing LDAP CA configmap
+          shell: >
+            oc get configmap -n openshift-config 
+            --field-selector=metadata.name="{{ ldap_ca_configmap_name }}" 
+            -o=jsonpath="{.items[*]['metadata.name']}"
+          register: ldap_ca_configmap_status
+          changed_when: false
+
+        - name: Display LDAP CA configmap status
+          debug:
+            msg: "LDAP CA configmap status: {{ 'exists' if ldap_ca_configmap_status.stdout else 'not found' }}"
+
+        - name: Verify LDAP CA certificate file exists
+          stat:
+            path: "{{ playbook_dir }}/../{{ ldap_ca_cert }}"
+          register: ldap_ca_file_stat
+          when: ldap_ca_configmap_status.stdout == ""
+
+        - name: Fail if LDAP CA certificate file not found
+          fail:
+            msg: "LDAP CA certificate file not found: {{ playbook_dir }}/../{{ ldap_ca_cert }}"
+          when:
+            - ldap_ca_configmap_status.stdout == ""
+            - not (ldap_ca_file_stat.stat.exists | default(false))
+
+        - name: Create LDAP CA configmap
+          shell: >
+            oc create configmap "{{ ldap_ca_configmap_name }}" 
+            --from-file=ca.crt="{{ playbook_dir }}/../{{ ldap_ca_cert }}" 
+            -n openshift-config
+          when: 
+            - ldap_ca_configmap_status.stdout == ""
+            - ldap_ca_file_stat.stat.exists | default(false)
+          register: ldap_ca_creation
+
+        - name: Verify LDAP CA configmap was created
+          shell: >
+            oc get configmap "{{ ldap_ca_configmap_name }}" -n openshift-config -o name
+          register: ldap_ca_verify
+          retries: 5
+          delay: 2
+          until: ldap_ca_verify.rc == 0
+          when: ldap_ca_creation is changed
+          changed_when: false
+
+        - name: Apply LDAP OAuth configuration
+          block:
+            - name: Check current OAuth LDAP configuration
+              shell: >
+                oc get oauth cluster -o jsonpath='{.spec.identityProviders[?(@.type=="LDAP")].name}'
+              register: current_oauth_ldap
+              changed_when: false
+              failed_when: false
+
+            - name: Display OAuth LDAP status
+              debug:
+                msg: |
+                  OAuth LDAP configuration status:
+                  - LDAP provider exists: {{ 'Yes' if current_oauth_ldap.stdout != '' else 'No' }}
+                  - Provider name: {{ current_oauth_ldap.stdout if current_oauth_ldap.stdout != '' else 'Not configured' }}
+                  - Configuration needed: {{ 'No' if current_oauth_ldap.stdout != '' else 'Yes' }}
+
+            - name: Apply LDAP OAuth configuration
+              kubernetes.core.k8s:
+                state: present
+                definition: "{{ lookup('template', '../templates/k8s/ldap/oauth-config.yaml') | from_yaml }}"
+              when: 
+                - override_ldap_config
+                - current_oauth_ldap.stdout == ''
+              register: oauth_apply_result
+
+            - name: Update LDAP OAuth configuration if changed
+              kubernetes.core.k8s:
+                state: present
+                definition: "{{ lookup('template', '../templates/k8s/ldap/oauth-config.yaml') | from_yaml }}"
+              when: 
+                - override_ldap_config
+                - current_oauth_ldap.stdout != ''
+              register: oauth_update_result
+          when: override_ldap_config
+
+        - name: Verify OAuth configuration applied
+          shell: >
+            oc get oauth cluster -o jsonpath='{.spec.identityProviders[?(@.type=="LDAP")].name}'
+          register: oauth_verification
+          when: oauth_apply_result is changed or oauth_update_result is changed
+          retries: "{{ default_retries | default(30) }}"
+          delay: "{{ default_delay | default(10) }}"
+          changed_when: false
+
+        - name: Display OAuth configuration status
+          debug:
+            msg: "LDAP OAuth provider configured: {{ oauth_verification.stdout | default('Failed') }}"
+          when: oauth_apply_result is succeeded
+
+        - name: Wait for authentication pods to be Running
+          shell: >
+            oc get pods -n openshift-authentication -l app=oauth-openshift -o jsonpath='{.items[*].status.phase}'
+          register: auth_pods_status
+          retries: 60
+          delay: 10
+          until: 
+            - auth_pods_status.stdout is defined
+            - auth_pods_status.stdout != ""
+            - auth_pods_status.stdout.split() | reject('equalto', 'Running') | list | length == 0
+          when: oauth_apply_result is changed or oauth_update_result is changed
+          changed_when: false
+
+        - name: Verify all authentication pods are Running
+          shell: >
+            oc get pods -n openshift-authentication -l app=oauth-openshift -o wide
+          register: auth_pods_final
+          when: oauth_apply_result is changed or oauth_update_result is changed
+          changed_when: false
+
+        - name: Display authentication pods status
+          debug:
+            msg: "{{ auth_pods_final.stdout_lines }}"
+          when: 
+            - auth_pods_final is defined 
+            - auth_pods_final.stdout is defined
+
+        - name: Wait for authentication cluster operator - Available=True
+          shell: >
+            oc get co authentication -o jsonpath='{.status.conditions[?(@.type=="Available")].status}'
+          register: auth_available
+          retries: 45
+          delay: 10
+          until: auth_available.stdout == "True"
+          when: oauth_apply_result is changed or oauth_update_result is changed
+          changed_when: false
+
+        - name: Wait for authentication cluster operator - Degraded=False
+          shell: >
+            oc get co authentication -o jsonpath='{.status.conditions[?(@.type=="Degraded")].status}'
+          register: auth_degraded
+          retries: 45
+          delay: 10
+          until: auth_degraded.stdout == "False"
+          when: oauth_apply_result is changed or oauth_update_result is changed
+          changed_when: false
+
+        - name: Wait for authentication cluster operator - Progressing=False
+          shell: >
+            oc get co authentication -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}'
+          register: auth_progressing
+          retries: 45
+          delay: 10
+          until: auth_progressing.stdout == "False"
+          when: oauth_apply_result is changed or oauth_update_result is changed
+          changed_when: false
+
+        - name: Display authentication cluster operator final status
+          debug:
+            msg: |
+              Authentication Cluster Operator Status:
+              - Available: {{ auth_available.stdout if auth_available is defined else 'Not checked' }}
+              - Degraded: {{ auth_degraded.stdout if auth_degraded is defined else 'Not checked' }}
+              - Progressing: {{ auth_progressing.stdout if auth_progressing is defined else 'Not checked' }}
+          when: oauth_apply_result is changed or oauth_update_result is changed
+
+        - name: Wait for authentication cluster operator to stabilize
+          shell: >
+            oc get co authentication -o jsonpath='{.status.conditions[?(@.type=="Available")].status} {.status.conditions[?(@.type=="Degraded")].status} {.status.conditions[?(@.type=="Progressing")].status}'
+          register: auth_co_final_check
+          retries: 30
+          delay: 10
+          until:
+            - auth_co_final_check.stdout is defined
+            - auth_co_final_check.stdout.split() | length >= 3
+            - auth_co_final_check.stdout.split()[0] == "True"
+            - auth_co_final_check.stdout.split()[1] == "False"
+            - auth_co_final_check.stdout.split()[2] == "False"
+          changed_when: false
+
+        - name: Display final authentication cluster operator health
+          debug:
+            msg: |
+              Final Authentication Cluster Operator Health Check:
+              - Available: {{ auth_co_final_check.stdout.split()[0] if auth_co_final_check.stdout is defined and auth_co_final_check.stdout.split() | length >= 3 else 'Unknown' }}
+              - Degraded: {{ auth_co_final_check.stdout.split()[1] if auth_co_final_check.stdout is defined and auth_co_final_check.stdout.split() | length >= 3 else 'Unknown' }}
+              - Progressing: {{ auth_co_final_check.stdout.split()[2] if auth_co_final_check.stdout is defined and auth_co_final_check.stdout.split() | length >= 3 else 'Unknown' }}
+              - Status: Healthy ✓
+
+      rescue:
+        - name: Display LDAP configuration error
+          debug:
+            msg: "LDAP configuration failed: {{ ansible_failed_result.msg | default('Unknown error') }}"
+
+        - name: Cleanup LDAP secret on failure
+          shell: oc delete secret {{ ldap_secret_name }} -n openshift-config --ignore-not-found=true
+          failed_when: false
+          changed_when: false
+          no_log: true
+
+        - name: Cleanup LDAP CA configmap on failure
+          shell: oc delete configmap {{ ldap_ca_configmap_name }} -n openshift-config --ignore-not-found=true
+          failed_when: false
+          changed_when: false
+
+        - name: Fail the playbook
+          fail:
+            msg: "LDAP configuration failed. Partial configuration has been cleaned up."
+
+      always:
+        - name: Display final LDAP configuration status
+          debug:
+            msg: "LDAP configuration {{ 'completed successfully' if ansible_failed_task is not defined else 'failed' }}"

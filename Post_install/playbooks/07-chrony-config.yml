@@ -1,0 +1,103 @@
+---
+- name: Configure Chrony NTP synchronization
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    override_chrony_config: "{{ enable_chrony | default(true) }}"
+
+  tasks:
+    - name: Check existing Chrony Machine Configs
+      k8s_info:
+        api_version: machineconfiguration.openshift.io/v1
+        kind: MachineConfig
+        name: "{{ item }}"
+      register: existing_chrony_configs
+      loop:
+        - 50-master-chrony
+        - 50-worker-chrony
+      failed_when: false
+      tags: [check, machine-config]
+
+    - name: Display Chrony configuration status
+      debug:
+        msg: |
+          Chrony Machine Config status:
+          - Master config exists: {{ 'Yes' if existing_chrony_configs.results[0].resources | length > 0 else 'No' }}
+          - Worker config exists: {{ 'Yes' if existing_chrony_configs.results[1].resources | length > 0 else 'No' }}
+          - Update needed: {{ 'No' if (existing_chrony_configs.results[0].resources | length > 0 and existing_chrony_configs.results[1].resources | length > 0) else 'Yes' }}
+      tags: [check, machine-config]
+
+    - name: Apply Master Chrony Machine Config
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/configs/machine-configs/50-master-chrony.yaml') | from_yaml }}"
+      check_mode: no
+      when: existing_chrony_configs.results[0].resources | length == 0 or override_chrony_config | default(false)
+      register: master_chrony_applied
+      tags: [configure, machine-config, master]
+        
+    - name: Apply Worker Chrony Machine Config
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/configs/machine-configs/50-worker-chrony.yaml') | from_yaml }}"
+      check_mode: no
+      when: existing_chrony_configs.results[1].resources | length == 0 or override_chrony_config | default(false)
+      register: worker_chrony_applied
+      tags: [configure, machine-config, worker]
+
+    - name: Wait briefly for MachineConfigPools to start processing changes
+      pause:
+        seconds: 30
+      when: master_chrony_applied is changed or worker_chrony_applied is changed
+      tags: [verify, machine-config]
+
+    - name: Check MachineConfigPool status for degradation
+      shell: >
+        oc get mcp -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Updated")].status}{" "}{.status.conditions[?(@.type=="Updating")].status}{" "}{.status.conditions[?(@.type=="Degraded")].status}{"\n"}{end}'
+      register: mcp_status_check
+      changed_when: false
+      tags: [verify, machine-config]
+
+    - name: Display MachineConfigPool status
+      debug:
+        msg: |
+          MachineConfigPool Status:
+          {% for line in mcp_status_check.stdout_lines %}
+          {% set parts = line.split() %}
+          - {{ parts[0] }}: Updated={{ parts[1] if parts|length > 1 else 'Unknown' }}, Updating={{ parts[2] if parts|length > 2 else 'Unknown' }}, Degraded={{ parts[3] if parts|length > 3 else 'Unknown' }}
+          {% endfor %}
+          
+          Note: MachineConfigPools may still be updating in the background. Node reboots will continue automatically.
+      tags: [verify]
+
+    - name: Verify no MachineConfigPool degradation
+      assert:
+        that:
+          - mcp_status_check.stdout is defined
+          - mcp_status_check.stdout_lines | length > 0
+          - mcp_status_check.stdout is not search('True False True')
+          - mcp_status_check.stdout is not search('False False True')
+        fail_msg: |
+          MachineConfigPool degradation detected! Please check:
+          oc get mcp
+          oc describe mcp master
+          oc describe mcp worker
+        success_msg: "MachineConfigPools are healthy - no degradation detected. Updates will continue in background."
+      tags: [verify]
+
+    - name: Display completion notice
+      debug:
+        msg: |
+          ✓ Chrony configuration applied successfully
+          ✓ No MachineConfigPool degradation detected
+          
+          Note: Node updates may still be in progress. To monitor:
+            oc get mcp
+            oc get nodes
+          
+          Nodes will automatically reboot one at a time to apply the chrony configuration.
+      tags: [verify]

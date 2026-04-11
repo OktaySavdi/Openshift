@@ -1,0 +1,47 @@
+---
+- name: Remove worker label from master/control-plane nodes
+  hosts: localhost
+  gather_facts: false
+  
+  tasks:
+    - name: Get all nodes with master or control-plane role
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+      register: all_nodes
+
+    - name: Identify master/control-plane nodes with worker label
+      ansible.builtin.set_fact:
+        master_nodes_with_worker: "{{ all_nodes.resources | 
+          selectattr('metadata.labels.node-role.kubernetes.io/master', 'defined') | 
+          selectattr('metadata.labels.node-role.kubernetes.io/worker', 'defined') | 
+          map(attribute='metadata.name') | list }}"
+
+    - name: Display master nodes that have worker label
+      ansible.builtin.debug:
+        msg: "Master nodes with worker label: {{ master_nodes_with_worker }}"
+      when: master_nodes_with_worker | length > 0
+
+    - name: Remove worker label from master/control-plane nodes
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Node
+        name: "{{ item }}"
+        state: patched
+        definition:
+          metadata:
+            labels:
+              node-role.kubernetes.io/worker: null
+      loop: "{{ master_nodes_with_worker }}"
+      when: master_nodes_with_worker | length > 0
+      register: label_removal
+
+    - name: Verify worker label removal
+      ansible.builtin.debug:
+        msg: "Worker label removed from {{ master_nodes_with_worker | length }} master node(s)"
+      when: master_nodes_with_worker | length > 0
+
+    - name: No action needed
+      ansible.builtin.debug:
+        msg: "No master nodes found with worker label"
+      when: master_nodes_with_worker | length == 0

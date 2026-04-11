@@ -1,0 +1,187 @@
+---
+- name: Deploy Kubecost for Cluster Cost Analysis
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  vars_files:
+    - ../vars/all_vars.yaml
+    - ../vars/vault.yml
+
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+  tasks:
+    - name: Display Kubecost deployment configuration
+      ansible.builtin.debug:
+        msg:
+          - "=== Kubecost Deployment Configuration ==="
+          - "Cluster: {{ cluster_name }}"
+          - "Azure Integration: {{ 'ENABLED' if enable_opencost_azure | default(false) else 'DISABLED' }}"
+          - "Excluded Namespaces: openshift-*"
+          - ""
+
+    #################################
+    # 1. CREATE NAMESPACE
+    #################################
+    
+    - name: Create kubecost namespace
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/kubecost-namespace.yaml') | from_yaml }}"
+      tags:
+        - kubecost
+        - namespace
+
+    - name: Create Prometheus RBAC for cluster monitoring access
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/kubecost/prometheus-rbac.yaml') | from_yaml_all }}"
+      tags:
+        - kubecost
+        - rbac
+
+    - name: Create OperatorGroup for Kubecost
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/kubecost-operatorgroup.yaml') | from_yaml }}"
+      tags:
+        - kubecost
+        - operator
+
+    - name: Subscribe to Kubecost operator
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/kubecost-subscription.yaml') | from_yaml }}"
+      tags:
+        - kubecost
+        - operator
+
+    - name: Wait for Kubecost operator to be ready
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: kubecost
+      register: kubecost_csv
+      retries: 30
+      delay: 10
+      until:
+        - kubecost_csv.resources | length > 0
+        - kubecost_csv.resources[0].status.phase == "Succeeded"
+      tags:
+        - kubecost
+        - operator
+
+    - name: Wait for CostAnalyzer CRD to be established
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: costanalyzers.charts.kubecost.com
+      register: costanalyzer_crd
+      retries: 20
+      delay: 5
+      until:
+        - costanalyzer_crd.resources | length > 0
+        - costanalyzer_crd.resources[0].status.conditions | selectattr('type', 'equalto', 'Established') | selectattr('status', 'equalto', 'True') | list | length > 0
+      tags:
+        - kubecost
+        - operator
+
+    #################################
+    # 2. DEPLOY KUBECOST INSTANCE
+    #################################
+
+    - name: Create Azure cloud integration secret
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/k8s/kubecost/azure-cloud-integration.yaml') | from_yaml }}"
+      when: enable_opencost_azure | default(false) | bool
+      tags:
+        - kubecost
+        - deployment
+
+    - name: Create Kubecost instance
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/kubecost/kubecost-instance.yaml') | from_yaml }}"
+      tags:
+        - kubecost
+        - deployment
+
+    - name: Wait for Kubecost cost-analyzer deployment
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: kubecost
+        name: kubecost-instance-cost-analyzer
+      register: cost_analyzer_deployment
+      retries: 20
+      delay: 10
+      until:
+        - cost_analyzer_deployment.resources | length > 0
+        - cost_analyzer_deployment.resources[0].status.availableReplicas | default(0) > 0
+      tags:
+        - kubecost
+        - deployment
+
+    #################################
+    # 3. EXPOSE UI VIA ROUTE
+    #################################
+
+    - name: Create Kubecost UI route
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/kubecost/kubecost-route.yaml') | from_yaml }}"
+      tags:
+        - kubecost
+        - route
+
+    #################################
+    # 4. VERIFICATION
+    #################################
+
+    - name: Get Kubecost deployment status
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: kubecost
+      register: kubecost_deployments
+      tags:
+        - kubecost
+        - verify
+
+    - name: Get Kubecost pods
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: kubecost
+      register: kubecost_pods
+      tags:
+        - kubecost
+        - verify
+
+    - name: Get Kubecost UI route
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: kubecost
+        name: kubecost-ui
+      register: kubecost_route
+      tags:
+        - kubecost
+        - verify
+
+    - name: Display Kubecost access information
+      when: 
+        - enable_opencost | default(false)
+        - kubecost_pods is defined
+        - kubecost_route is defined
+      ansible.builtin.debug:
+        msg:
+          - "✅ Kubecost deployed: {{ kubecost_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length }}/{{ kubecost_pods.resources | length }} pods running"
+          - "🌐 UI: https://{{ kubecost_route.resources[0].spec.host }}"
+          - "{{ '✅ Azure billing enabled' if enable_opencost_azure | default(false) else '⚠️  Azure billing disabled - costs will show as $0.00' }}"
+          - "💡 Wait 10-15 min for data collection, then check Allocations tab"
+      tags:
+        - kubecost
+        - verify

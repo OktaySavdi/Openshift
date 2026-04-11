@@ -1,0 +1,120 @@
+---
+- name: Configure cluster-wide proxy settings
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    enable_proxy_config: "{{ enable_cluster_proxy | default(false) }}"
+
+  pre_tasks:
+    - name: Test cluster connectivity
+      shell: oc whoami
+      register: cluster_test
+      changed_when: false
+
+  tasks:
+    - name: Configure cluster proxy settings
+      when: enable_proxy_config | bool
+      block:
+        - name: Check current proxy configuration
+          k8s_info:
+            api_version: config.openshift.io/v1
+            kind: Proxy
+            name: cluster
+          register: current_proxy_config
+
+        - name: Display current proxy configuration
+          debug:
+            msg: |
+              Current Proxy Settings:
+              HTTP Proxy: {{ current_proxy_config.resources[0].spec.httpProxy | default('Not set') }}
+              HTTPS Proxy: {{ current_proxy_config.resources[0].spec.httpsProxy | default('Not set') }}
+              No Proxy: {{ current_proxy_config.resources[0].spec.noProxy | default('Not set') }}
+              Trusted CA: {{ current_proxy_config.resources[0].spec.trustedCA.name | default('Not set') }}
+          when: current_proxy_config.resources | length > 0
+
+        - name: Check if proxy configuration matches desired state
+          set_fact:
+            proxy_config_matches: >-
+              {{
+                current_proxy_config.resources | length > 0 and
+                current_proxy_config.resources[0].spec.httpProxy | default('') == http_proxy | default('') and
+                current_proxy_config.resources[0].spec.httpsProxy | default('') == https_proxy | default('') and
+                current_proxy_config.resources[0].spec.noProxy | default('') == no_proxy | default('')
+              }}
+          when: current_proxy_config.resources | length > 0
+
+        - name: Display proxy configuration comparison
+          debug:
+            msg: |
+              Proxy configuration comparison:
+              - Current matches desired: {{ 'Yes' if proxy_config_matches | default(false) else 'No' }}
+              - Update needed: {{ 'No' if proxy_config_matches | default(false) else 'Yes' }}
+          when: current_proxy_config.resources | length > 0
+
+        - name: Create proxy CA bundle ConfigMap from ca-bundle.crt
+          when: 
+            - lookup('file', '../certs/ca-bundle.crt', errors='ignore') != ''
+            - current_proxy_config.resources[0].spec.trustedCA.name | default('') != 'user-ca-bundle'
+          k8s:
+            definition: "{{ lookup('template', '../templates/k8s/proxy/user-ca-bundle.yaml') | from_yaml }}"
+            state: present
+          register: ca_configmap_result
+
+        - name: Configure cluster proxy settings
+          k8s:
+            definition: "{{ lookup('template', '../templates/k8s/proxy/cluster-proxy-config.yaml') | from_yaml }}"
+            state: present
+          register: proxy_update
+          when: not (proxy_config_matches | default(false))
+
+        - name: Wait for proxy configuration to be applied
+          k8s_info:
+            api_version: config.openshift.io/v1
+            kind: Proxy
+            name: cluster
+          register: updated_proxy_config
+          retries: 10
+          delay: 30
+          until: 
+            - updated_proxy_config.resources | length > 0
+            - updated_proxy_config.resources[0].status is defined
+
+        - name: Display updated proxy configuration
+          debug:
+            msg: |
+              ✅ Cluster Proxy Configuration Complete!
+              
+              Configured Settings:
+              - HTTP Proxy: {{ updated_proxy_config.resources[0].spec.httpProxy | default('Not configured') }}
+              - HTTPS Proxy: {{ updated_proxy_config.resources[0].spec.httpsProxy | default('Not configured') }}
+              - No Proxy: {{ updated_proxy_config.resources[0].spec.noProxy | default('Not configured') }}
+              - Trusted CA ConfigMap: {{ updated_proxy_config.resources[0].spec.trustedCA.name | default('Not configured') }}
+              
+              Status (Applied by cluster):
+              - HTTP Proxy Status: {{ updated_proxy_config.resources[0].status.httpProxy | default('Not set') }}
+              - HTTPS Proxy Status: {{ updated_proxy_config.resources[0].status.httpsProxy | default('Not set') }}
+              - No Proxy Status: {{ updated_proxy_config.resources[0].status.noProxy | default('Not set') }}
+
+        - name: Check nodes for proxy environment variables
+          shell: "oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\": \"}{.status.nodeInfo.osImage}{\"\\n\"}{end}'"
+          register: node_status
+          changed_when: false
+
+        - name: Display proxy rollout information
+          debug:
+            msg: |
+              📋 Proxy Configuration Applied!
+              
+              The proxy settings have been configured cluster-wide.
+              All nodes will be rebooted automatically to apply the new proxy settings.
+              
+              Monitor the rollout:
+              - Check machine config pools: oc get mcp
+              - Monitor node status: oc get nodes
+              - Watch for rebooting nodes: oc get nodes -w
+              
+              Note: It may take 10-30 minutes for all nodes to restart and apply proxy settings.

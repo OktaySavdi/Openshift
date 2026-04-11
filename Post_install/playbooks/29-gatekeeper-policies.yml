@@ -1,0 +1,205 @@
+---
+- name: Install Gatekeeper Operator
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+  pre_tasks:
+    - name: Verify gatekeeper installation is enabled
+      assert:
+        that:
+          - enable_gatekeeper | default(false) | bool
+        fail_msg: "Gatekeeper is disabled. Set enable_gatekeeper: true to proceed"
+      tags: always
+
+  tasks:
+    - name: Check if gatekeeper operator is already installed
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: openshift-gatekeeper-system
+      register: gatekeeper_csv_check
+      failed_when: false
+      check_mode: no
+      tags: [check, operators]
+
+    - name: Check gatekeeper operator subscription exists
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: gatekeeper-operator-product
+        namespace: openshift-gatekeeper-system
+      register: gatekeeper_sub_check
+      failed_when: false
+      check_mode: no
+      tags: [check, operators]
+
+    - name: Display gatekeeper operator installation status
+      debug:
+        msg: |
+          Gatekeeper Operator status:
+          - CSV exists: {{ 'Yes' if gatekeeper_csv_check.resources | length > 0 else 'No' }}
+          - Subscription exists: {{ 'Yes' if gatekeeper_sub_check.resources | length > 0 else 'No' }}
+          - Installation needed: {{ 'No' if (gatekeeper_csv_check.resources | length > 0 and gatekeeper_sub_check.resources | length > 0) else 'Yes' }}
+      tags: [check, operators]
+
+    - name: Apply gatekeeper operator namespace
+      k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/gatekeeper-operator-namespace.yaml') | from_yaml }}"
+      register: gatekeeper_namespace_result
+      when: gatekeeper_sub_check.resources | length == 0
+      check_mode: no
+      tags: [install, operators, namespace]
+
+    - name: Apply gatekeeper operator group
+      k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/gatekeeper-operator-group.yaml') | from_yaml }}"
+      register: gatekeeper_group_result
+      when: gatekeeper_sub_check.resources | length == 0
+      check_mode: no
+      tags: [install, operators]
+
+    - name: Apply gatekeeper operator subscription
+      k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/gatekeeper-operator-subscription.yaml') | from_yaml }}"
+      register: gatekeeper_subscription_result
+      when: gatekeeper_sub_check.resources | length == 0
+      check_mode: no
+      tags: [install, operators]
+
+    - name: Wait for gatekeeper operator to be ready
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: openshift-gatekeeper-system
+      register: gatekeeper_csv_status
+      until: 
+        - gatekeeper_csv_status.resources | length > 0
+        - gatekeeper_csv_status.resources[0].status.phase is defined
+        - gatekeeper_csv_status.resources[0].status.phase == "Succeeded"
+      retries: 30
+      delay: 10
+      when: gatekeeper_subscription_result is changed
+      check_mode: no
+      tags: [verify, operators]
+
+    - name: Verify gatekeeper operator pods are running
+      k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-gatekeeper-system
+        label_selectors:
+          - "name=gatekeeper-operator-controller-manager"
+      register: gatekeeper_operator_pods
+      until:
+        - gatekeeper_operator_pods.resources | length > 0
+        - gatekeeper_operator_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length == gatekeeper_operator_pods.resources | length
+      retries: 45
+      delay: 10
+      when: gatekeeper_subscription_result is changed
+      check_mode: no
+      tags: [verify, operators]
+
+    - name: Check if Gatekeeper instance exists
+      k8s_info:
+        api_version: operator.gatekeeper.sh/v1alpha1
+        kind: Gatekeeper
+        name: gatekeeper
+      register: gatekeeper_instance_check
+      failed_when: false
+      check_mode: no
+      tags: [check, instance]
+
+    - name: Create Gatekeeper instance
+      k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/gatekeeper-instance.yaml') | from_yaml }}"
+      register: gatekeeper_instance_result
+      when: gatekeeper_instance_check.resources | length == 0
+      check_mode: no
+      tags: [install, instance]
+
+    - name: Wait for Gatekeeper instance to be ready
+      k8s_info:
+        api_version: operator.gatekeeper.sh/v1alpha1
+        kind: Gatekeeper
+        name: gatekeeper
+      register: gatekeeper_instance
+      retries: 30
+      delay: 10
+      until:
+        - gatekeeper_instance.resources | length > 0
+      when: gatekeeper_instance_result is changed or gatekeeper_subscription_result is changed
+      check_mode: no
+      tags: [verify, instance]
+
+    - name: Verify Gatekeeper webhook pods are running
+      k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-gatekeeper-system
+        label_selectors:
+          - "control-plane=controller-manager"
+      register: gatekeeper_webhook_pods
+      until:
+        - gatekeeper_webhook_pods.resources | length > 0
+        - gatekeeper_webhook_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length == gatekeeper_webhook_pods.resources | length
+      retries: 45
+      delay: 10
+      when: gatekeeper_instance_result is changed or gatekeeper_subscription_result is changed
+      check_mode: no
+      tags: [verify, instance]
+
+    - name: Display gatekeeper operator final status
+      debug:
+        msg: |
+          Gatekeeper Operator installation complete!
+          - Installation skipped: {{ 'Yes (already installed)' if gatekeeper_sub_check.resources | length > 0 else 'No (fresh installation)' }}
+          - Operator pods ready: {{ gatekeeper_operator_pods.resources | length if gatekeeper_operator_pods.resources is defined else 'Already running' }}
+          - Gatekeeper webhook pods: {{ gatekeeper_webhook_pods.resources | length if gatekeeper_webhook_pods.resources is defined else 'Already running' }}
+      tags: [verify, operators]
+
+    #################################
+    # DEPLOY POLICY TEMPLATES
+    #################################
+    - name: Deploy Gatekeeper policy templates and constraints
+      k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/k8s/policies/gatekeeper-policies.yaml.j2') }}"
+      register: gatekeeper_policies
+      tags: [configure, policies]
+
+    - name: Wait for ConstraintTemplates CRDs to be established
+      shell: oc get crd | grep -E '(k8srequiredlabels|k8sblockprivileged|k8srequireresourcelimits)' | wc -l
+      register: templates_count
+      retries: 10
+      delay: 5
+      until: templates_count.stdout | int >= 3
+      changed_when: false
+      when: gatekeeper_policies is changed
+      check_mode: no
+      tags: [verify, policies]
+
+    - name: Apply Gatekeeper constraints (after CRDs are ready)
+      k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/k8s/policies/gatekeeper-policies.yaml.j2') }}"
+      register: gatekeeper_constraints
+      when: gatekeeper_policies is changed
+      check_mode: no
+      tags: [configure, policies]
+
+    - name: Display deployed policies
+      debug:
+        msg: |
+          Gatekeeper policies deployed:
+          - K8sRequiredLabels: Enforce required labels on namespaces
+          - K8sBlockPrivileged: Block privileged containers
+          - K8sRequireResourceLimits: Enforce resource limits on workloads
+      tags: [verify, policies]

@@ -1,0 +1,161 @@
+---
+- name: Configure SSH authorized keys for OpenShift nodes
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+    - ../vars/vault.yml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+  pre_tasks:
+    - name: Test cluster connectivity
+      command: oc whoami
+      register: cluster_test
+      changed_when: false
+
+  tasks:
+    - name: Configure SSH keys for master nodes
+      block:
+        - name: Check if master SSH MachineConfig already exists
+          kubernetes.core.k8s_info:
+            api_version: machineconfiguration.openshift.io/v1
+            kind: MachineConfig
+            name: 99-master-ssh
+          register: existing_master_ssh_config
+          tags: [check, ssh, master]
+
+        - name: Check if master SSH key needs update
+          set_fact:
+            master_ssh_needs_update: >-
+              {{
+                existing_master_ssh_config.resources | length == 0 or
+                vault_ssh_public_key not in (existing_master_ssh_config.resources[0].spec.config.passwd.users[0].sshAuthorizedKeys | default([]))
+              }}
+          tags: [check, ssh, master]
+
+        - name: Display master SSH MachineConfig status
+          debug:
+            msg: |
+              Master SSH MachineConfig status:
+              - Exists: {{ 'Yes' if existing_master_ssh_config.resources | length > 0 else 'No' }}
+              - SSH key matches: {{ 'Yes' if not master_ssh_needs_update else 'No' }}
+              - Action needed: {{ 'Yes - will update' if master_ssh_needs_update else 'No - already configured' }}
+          tags: [check, ssh, master]
+
+        - name: Apply master SSH MachineConfig
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ lookup('template', '../templates/configs/machine-configs/99-master-ssh.yaml') | from_yaml }}"
+          when: master_ssh_needs_update | bool
+          register: master_ssh_result
+          tags: [ssh, master, machine-config]
+
+        - name: Wait briefly for master MachineConfigPool to start updating
+          pause:
+            seconds: 30
+          when: master_ssh_result is changed
+          tags: [ssh, master, wait]
+
+        - name: Check master MachineConfigPool for degradation
+          kubernetes.core.k8s_info:
+            api_version: machineconfiguration.openshift.io/v1
+            kind: MachineConfigPool
+            name: master
+          register: master_mcp_status
+          when: master_ssh_result is changed
+          tags: [ssh, master, wait]
+
+        - name: Verify master MachineConfigPool is not degraded
+          assert:
+            that:
+              - master_mcp_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'True') | list | length == 0
+            fail_msg: "Master MachineConfigPool is degraded. Check with: oc get mcp master -o yaml"
+            success_msg: "Master MachineConfigPool update started successfully. Updates will continue in background."
+          when: master_ssh_result is changed
+          tags: [ssh, master, wait]
+
+    - name: Configure SSH keys for worker nodes
+      block:
+        - name: Check if worker SSH MachineConfig already exists
+          kubernetes.core.k8s_info:
+            api_version: machineconfiguration.openshift.io/v1
+            kind: MachineConfig
+            name: 99-worker-ssh
+          register: existing_worker_ssh_config
+          tags: [check, ssh, worker]
+
+        - name: Check if worker SSH key needs update
+          set_fact:
+            worker_ssh_needs_update: >-
+              {{
+                existing_worker_ssh_config.resources | length == 0 or
+                vault_ssh_public_key not in (existing_worker_ssh_config.resources[0].spec.config.passwd.users[0].sshAuthorizedKeys | default([]))
+              }}
+          tags: [check, ssh, worker]
+
+        - name: Display worker SSH MachineConfig status
+          debug:
+            msg: |
+              Worker SSH MachineConfig status:
+              - Exists: {{ 'Yes' if existing_worker_ssh_config.resources | length > 0 else 'No' }}
+              - SSH key matches: {{ 'Yes' if not worker_ssh_needs_update else 'No' }}
+              - Action needed: {{ 'Yes - will update' if worker_ssh_needs_update else 'No - already configured' }}
+          tags: [check, ssh, worker]
+
+        - name: Apply worker SSH MachineConfig
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ lookup('template', '../templates/configs/machine-configs/99-worker-ssh.yaml') | from_yaml }}"
+          when: worker_ssh_needs_update | bool
+          register: worker_ssh_result
+          tags: [ssh, worker, machine-config]
+
+        - name: Wait briefly for worker MachineConfigPool to start updating
+          pause:
+            seconds: 30
+          when: worker_ssh_result is changed
+          tags: [ssh, worker, wait]
+
+        - name: Check worker MachineConfigPool for degradation
+          kubernetes.core.k8s_info:
+            api_version: machineconfiguration.openshift.io/v1
+            kind: MachineConfigPool
+            name: worker
+          register: worker_mcp_status
+          when: worker_ssh_result is changed
+          tags: [ssh, worker, wait]
+
+        - name: Verify worker MachineConfigPool is not degraded
+          assert:
+            that:
+              - worker_mcp_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'True') | list | length == 0
+            fail_msg: "Worker MachineConfigPool is degraded. Check with: oc get mcp worker -o yaml"
+            success_msg: "Worker MachineConfigPool update started successfully. Updates will continue in background."
+          when: worker_ssh_result is changed
+          tags: [ssh, worker, wait]
+
+    - name: Verify SSH configuration
+      block:
+        - name: Get MachineConfigPool status
+          shell: oc get mcp
+          register: mcp_status
+          changed_when: false
+          tags: [verify, ssh]
+
+        - name: Display MachineConfigPool status
+          debug:
+            msg: "{{ mcp_status.stdout_lines }}"
+          tags: [verify, ssh]
+
+        - name: Display completion message
+          debug:
+            msg: |
+              SSH authorized keys configuration completed successfully!
+              
+              Master nodes and worker nodes are now configured with the SSH public key.
+              Nodes will reboot automatically to apply the changes.
+              
+              Monitor the rollout with: oc get mcp -w
+          tags: [verify, ssh]

@@ -1,0 +1,184 @@
+---
+- name: Configure image registry storage
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    enable_registry_storage_config: "{{ enable_registry_storage | default(true) }}"
+
+  pre_tasks:
+    - name: Test cluster connectivity
+      shell: oc whoami
+      register: cluster_test
+      changed_when: false
+
+  tasks:
+    - name: Configure image registry storage
+      when: enable_registry_storage_config | bool
+      block:
+        - name: Check current image registry configuration
+          k8s_info:
+            api_version: imageregistry.operator.openshift.io/v1
+            kind: Config
+            name: cluster
+          register: current_registry_config
+
+        - name: Display current registry storage configuration
+          debug:
+            msg: |
+              Current Image Registry Storage:
+              Management State: {{ current_registry_config.resources[0].spec.managementState | default('Not set') }}
+              Storage Type: {{ current_registry_config.resources[0].spec.storage.keys() | list | first | default('Not configured') }}
+              {% if current_registry_config.resources[0].spec.storage.pvc is defined %}
+              PVC Claim: {{ current_registry_config.resources[0].spec.storage.pvc.claim | default('Not set') }}
+              {% endif %}
+          when: current_registry_config.resources | length > 0
+
+        - name: Check if registry storage already configured with desired PVC
+          set_fact:
+            registry_storage_configured: >-
+              {{
+                current_registry_config.resources | length > 0 and
+                current_registry_config.resources[0].spec.storage.pvc is defined and
+                current_registry_config.resources[0].spec.storage.pvc.claim == registry_pvc_name and
+                current_registry_config.resources[0].spec.managementState == 'Managed'
+              }}
+          when: current_registry_config.resources | length > 0
+
+        - name: Display registry storage status
+          debug:
+            msg: |
+              Registry storage status:
+              - Already configured with PVC {{ registry_pvc_name }}: {{ 'Yes' if registry_storage_configured | default(false) else 'No' }}
+              - Configuration needed: {{ 'No' if registry_storage_configured | default(false) else 'Yes' }}
+          when: current_registry_config.resources | length > 0
+
+        - name: Check existing PVCs in image registry namespace
+          k8s_info:
+            api_version: v1
+            kind: PersistentVolumeClaim
+            namespace: openshift-image-registry
+          register: existing_pvcs
+
+        - name: Check if desired PVC already exists
+          set_fact:
+            pvc_already_exists: >-
+              {{
+                existing_pvcs.resources | 
+                selectattr('metadata.name', 'equalto', registry_pvc_name) | 
+                list | length > 0
+              }}
+
+        - name: Display existing PVCs
+          debug:
+            msg: |
+              Existing PVCs: {{ existing_pvcs.resources | map(attribute='metadata.name') | list | join(', ') if existing_pvcs.resources | length > 0 else 'None' }}
+              Desired PVC {{ registry_pvc_name }}: {{ 'Already exists' if pvc_already_exists else 'Will be created' }}
+
+        - name: Create NFS PV and PVC for registry storage
+          when: 
+            - registry_storage_type == "nfs"
+            - not pvc_already_exists
+          k8s:
+            definition: "{{ lookup('template', '../templates/k8s/registry/registry-nfs-storage.yaml') | from_yaml_all | list }}"
+            state: present
+          register: nfs_storage_result
+
+        - name: Create simple PVC for registry storage
+          when: 
+            - registry_storage_type == "pvc"
+            - not pvc_already_exists
+          k8s:
+            definition: "{{ lookup('template', '../templates/k8s/registry/registry-pvc-storage.yaml') | from_yaml }}"
+            state: present
+          register: pvc_storage_result
+
+        - name: Wait for PVC to be bound
+          k8s_info:
+            api_version: v1
+            kind: PersistentVolumeClaim
+            name: "{{ registry_pvc_name }}"
+            namespace: openshift-image-registry
+          register: pvc_status
+          retries: 30
+          delay: 10
+          until: 
+            - pvc_status.resources | length > 0
+            - pvc_status.resources[0].status.phase == "Bound"
+
+        - name: Configure image registry to use PVC storage
+          k8s:
+            definition:
+              apiVersion: imageregistry.operator.openshift.io/v1
+              kind: Config
+              metadata:
+                name: cluster
+              spec:
+                storage:
+                  pvc:
+                    claim: "{{ registry_pvc_name }}"
+            merge_type: merge
+            state: present
+          register: registry_storage_config
+          when: not (registry_storage_configured | default(false))
+
+        - name: Set image registry to managed state
+          k8s:
+            definition:
+              apiVersion: imageregistry.operator.openshift.io/v1
+              kind: Config
+              metadata:
+                name: cluster
+              spec:
+                managementState: "Managed"
+            merge_type: merge
+            state: present
+          register: registry_management_config
+          when: 
+            - current_registry_config.resources | length > 0
+            - current_registry_config.resources[0].spec.managementState | default('') != 'Managed'
+
+        - name: Wait for image registry operator to reconcile
+          k8s_info:
+            api_version: config.openshift.io/v1
+            kind: ClusterOperator
+            name: image-registry
+          register: registry_operator_status
+          retries: 30
+          delay: 30
+          until: 
+            - registry_operator_status.resources | length > 0
+            - registry_operator_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | map(attribute='status') | first == "True"
+
+        - name: Check image registry pods
+          k8s_info:
+            api_version: v1
+            kind: Pod
+            namespace: openshift-image-registry
+            label_selectors:
+              - "docker-registry=default"
+          register: registry_pods
+
+        - name: Display registry configuration status
+          debug:
+            msg: |
+              ✅ Image Registry Storage Configuration Complete!
+              
+              Storage Configuration:
+              - Storage Type: {{ registry_storage_type }}
+              - PVC Name: {{ registry_pvc_name }}
+              - Storage Size: {{ registry_storage_size }}
+              {% if registry_storage_type == "nfs" %}
+              - NFS Server: {{ nfs_server }}
+              - NFS Path: {{ registry_nfs_path }}
+              {% endif %}
+              
+              Registry Status:
+              - Management State: Managed
+              - Running Pods: {{ registry_pods.resources | length }}
+              - Operator Status: {{ registry_operator_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | map(attribute='status') | first }}
+              
+              PVC Status: {{ pvc_status.resources[0].status.phase if pvc_status.resources | length > 0 else 'Unknown' }}

@@ -1,0 +1,336 @@
+---
+- name: Deploy GT Operators
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+    - ../vars/vault.yml
+
+  tasks:
+    - name: Check if gt-operators namespace exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: gt-operators
+      register: gt_namespace_check
+      when: enable_gt_operators | bool
+
+    - name: Deploy gt-operators namespace
+      kubernetes.core.k8s:
+        state: present
+        template: ../templates/k8s/workloads/namespace.yaml
+      when:
+        - enable_gt_operators | bool
+        - gt_namespace_check.resources | length == 0
+
+    #################################
+    # Private Registry Secret
+    #################################
+    - name: Check if registry secret exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: regcred
+        namespace: gt-operators
+      register: registry_secret_check
+      when:
+        - enable_gt_operators | bool
+        - enable_registry_secret | default(false)
+
+    - name: Deploy private registry secret
+      kubernetes.core.k8s:
+        state: present
+        template: ../templates/k8s/workloads/registry-secret.yaml
+      when:
+        - enable_gt_operators | bool
+        - enable_registry_secret | default(false)
+        - registry_secret_check.resources | length == 0
+
+    - name: Registry secret deployment status
+      ansible.builtin.debug:
+        msg: "Private registry secret {{ 'deployed' if (registry_secret_check.resources | length == 0) else 'already exists' }}"
+      when:
+        - enable_gt_operators | bool
+        - enable_registry_secret | default(false)
+
+    #################################
+    # Security Context Constraints
+    #################################
+    - name: Grant anyuid SCC to operator service accounts
+      ansible.builtin.shell: |
+        for sa in cert-expiry-monitor-sa namespace-quota-monitor-sa node-resource-monitor-sa pvc-storage-monitor-sa cluster-intelligence-sa cost-optimization-sa pod-cleanup-sa; do
+          oc adm policy add-scc-to-user anyuid -z $sa -n gt-operators
+        done
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: enable_gt_operators | bool
+      register: scc_grant_result
+      changed_when: "'added' in scc_grant_result.stdout"
+
+    - name: Grant privileged SCC to etcd-backup service account
+      ansible.builtin.shell: |
+        oc adm policy add-scc-to-user privileged -z etcd-backup-sa -n gt-operators
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      when: enable_gt_operators | bool
+      register: scc_privileged_result
+      changed_when: "'added' in scc_privileged_result.stdout"
+
+    #################################
+    # Pod Cleanup CronJob
+    #################################
+    - name: Check if pod-cleanup-cronjob CronJob exists
+      kubernetes.core.k8s_info:
+        api_version: batch/v1
+        kind: CronJob
+        name: pod-cleanup-cronjob
+        namespace: gt-operators
+      register: pod_cleanup_check
+      when:
+        - enable_gt_operators | bool
+        - enable_pod_cleanup | bool
+
+    - name: Deploy Pod Cleanup CronJob operator
+      kubernetes.core.k8s:
+        state: present
+        template: ../templates/k8s/workloads/pod-cleanup-cronjob.yaml
+      when:
+        - enable_gt_operators | bool
+        - enable_pod_cleanup | bool
+        - pod_cleanup_check.resources | length == 0
+
+    - name: Pod Cleanup deployment status
+      ansible.builtin.debug:
+        msg: "Pod Cleanup CronJob {{ 'deployed' if (pod_cleanup_check.resources | length == 0) else 'already exists' }}"
+      when:
+        - enable_gt_operators | bool
+        - enable_pod_cleanup | bool
+
+    #################################
+    # Certificate Expiry Monitor
+    #################################
+    - name: Check if cert-expiry-monitor CronJob exists
+      kubernetes.core.k8s_info:
+        api_version: batch/v1
+        kind: CronJob
+        name: cert-expiry-monitor
+        namespace: gt-operators
+      register: cert_expiry_check
+      when:
+        - enable_gt_operators | bool
+        - enable_cert_expiry_monitor | bool
+
+    - name: Deploy Certificate Expiry Monitor operator
+      kubernetes.core.k8s:
+        state: present
+        template: ../templates/k8s/workloads/cert-expiry-monitor.yaml
+      when:
+        - enable_gt_operators | bool
+        - enable_cert_expiry_monitor | bool
+        - cert_expiry_check.resources | length == 0
+
+    - name: Certificate Expiry Monitor deployment status
+      ansible.builtin.debug:
+        msg: "Certificate Expiry Monitor {{ 'deployed' if (cert_expiry_check.resources | length == 0) else 'already exists' }}"
+      when:
+        - enable_gt_operators | bool
+        - enable_cert_expiry_monitor | bool
+
+    #################################
+    # ETCD Backup
+    #################################
+    - name: Check if etcd-backup CronJob exists
+      kubernetes.core.k8s_info:
+        api_version: batch/v1
+        kind: CronJob
+        name: etcd-backup
+        namespace: gt-operators
+      register: etcd_backup_check
+      when:
+        - enable_gt_operators | bool
+        - enable_etcd_backup | bool
+
+    - name: Deploy ETCD Backup operator
+      kubernetes.core.k8s:
+        state: present
+        template: ../templates/k8s/workloads/etcd-backup-cronjob.yaml
+      when:
+        - enable_gt_operators | bool
+        - enable_etcd_backup | bool
+        - etcd_backup_check.resources | length == 0
+
+    - name: ETCD Backup deployment status
+      ansible.builtin.debug:
+        msg: "ETCD Backup {{ 'deployed' if (etcd_backup_check.resources | length == 0) else 'already exists' }}"
+      when:
+        - enable_gt_operators | bool
+        - enable_etcd_backup | bool
+
+    #################################
+    # Cluster Intelligence
+    #################################
+    - name: Check if cluster-intelligence Deployment exists
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: cluster-intelligence-operator
+        namespace: gt-operators
+      register: cluster_intelligence_check
+      when:
+        - enable_gt_operators | bool
+        - enable_cluster_intelligence | bool
+
+    - name: Deploy Cluster Intelligence operator
+      kubernetes.core.k8s:
+        state: present
+        template: ../templates/k8s/workloads/cluster-intelligence-operator.yaml
+      when:
+        - enable_gt_operators | bool
+        - enable_cluster_intelligence | bool
+        - cluster_intelligence_check.resources | length == 0
+
+    - name: Cluster Intelligence deployment status
+      ansible.builtin.debug:
+        msg: "Cluster Intelligence {{ 'deployed' if (cluster_intelligence_check.resources | length == 0) else 'already exists' }}"
+      when:
+        - enable_gt_operators | bool
+        - enable_cluster_intelligence | bool
+
+    #################################
+    # Cost Optimization
+    #################################
+    - name: Check if cost-optimization Deployment exists
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: cost-optimization-operator
+        namespace: gt-operators
+      register: cost_optimization_check
+      when:
+        - enable_gt_operators | bool
+        - enable_cost_optimization | bool
+
+    - name: Deploy Cost Optimization operator
+      kubernetes.core.k8s:
+        state: present
+        template: ../templates/k8s/workloads/cost-optimization-operator.yaml
+      when:
+        - enable_gt_operators | bool
+        - enable_cost_optimization | bool
+        - cost_optimization_check.resources | length == 0
+
+    - name: Cost Optimization deployment status
+      ansible.builtin.debug:
+        msg: "Cost Optimization {{ 'deployed' if (cost_optimization_check.resources | length == 0) else 'already exists' }}"
+      when:
+        - enable_gt_operators | bool
+        - enable_cost_optimization | bool
+
+    #################################
+    # Namespace Quota Monitor
+    #################################
+    - name: Check if namespace-quota-monitor CronJob exists
+      kubernetes.core.k8s_info:
+        api_version: batch/v1
+        kind: CronJob
+        name: namespace-quota-monitor
+        namespace: gt-operators
+      register: namespace_quota_check
+      when:
+        - enable_gt_operators | bool
+        - enable_namespace_quota_monitor | bool
+
+    - name: Deploy Namespace Quota Monitor operator
+      kubernetes.core.k8s:
+        state: present
+        template: ../templates/k8s/workloads/namespace-quota-monitor.yaml
+      when:
+        - enable_gt_operators | bool
+        - enable_namespace_quota_monitor | bool
+        - namespace_quota_check.resources | length == 0
+
+    - name: Namespace Quota Monitor deployment status
+      ansible.builtin.debug:
+        msg: "Namespace Quota Monitor {{ 'deployed' if (namespace_quota_check.resources | length == 0) else 'already exists' }}"
+      when:
+        - enable_gt_operators | bool
+        - enable_namespace_quota_monitor | bool
+
+    #################################
+    # Node Resource Monitor
+    #################################
+    - name: Check if node-resource-monitor CronJob exists
+      kubernetes.core.k8s_info:
+        api_version: batch/v1
+        kind: CronJob
+        name: node-resource-monitor
+        namespace: gt-operators
+      register: node_resource_check
+      when:
+        - enable_gt_operators | bool
+        - enable_node_resource_monitor | bool
+
+    - name: Deploy Node Resource Monitor operator
+      kubernetes.core.k8s:
+        state: present
+        template: ../templates/k8s/workloads/node-resource-monitor.yaml
+      when:
+        - enable_gt_operators | bool
+        - enable_node_resource_monitor | bool
+        - node_resource_check.resources | length == 0
+
+    - name: Node Resource Monitor deployment status
+      ansible.builtin.debug:
+        msg: "Node Resource Monitor {{ 'deployed' if (node_resource_check.resources | length == 0) else 'already exists' }}"
+      when:
+        - enable_gt_operators | bool
+        - enable_node_resource_monitor | bool
+
+    #################################
+    # PVC Storage Monitor
+    #################################
+    - name: Check if pvc-storage-monitor CronJob exists
+      kubernetes.core.k8s_info:
+        api_version: batch/v1
+        kind: CronJob
+        name: pvc-storage-monitor
+        namespace: gt-operators
+      register: pvc_storage_check
+      when:
+        - enable_gt_operators | bool
+        - enable_pvc_storage_monitor | bool
+
+    - name: Deploy PVC Storage Monitor operator
+      kubernetes.core.k8s:
+        state: present
+        template: ../templates/k8s/workloads/pvc-storage-monitor.yaml
+      when:
+        - enable_gt_operators | bool
+        - enable_pvc_storage_monitor | bool
+        - pvc_storage_check.resources | length == 0
+
+    - name: PVC Storage Monitor deployment status
+      ansible.builtin.debug:
+        msg: "PVC Storage Monitor {{ 'deployed' if (pvc_storage_check.resources | length == 0) else 'already exists' }}"
+      when:
+        - enable_gt_operators | bool
+        - enable_pvc_storage_monitor | bool
+
+    #################################
+    # Final Summary
+    #################################
+    - name: Operators deployment summary
+      ansible.builtin.debug:
+        msg: |
+          GT Operators Deployment Summary:
+          - Namespace: gt-operators {{ 'created' if (gt_namespace_check.resources | length == 0) else 'already exists' }}
+          - Pod Cleanup: {{ 'enabled' if enable_pod_cleanup else 'disabled' }}
+          - Certificate Expiry Monitor: {{ 'enabled' if enable_cert_expiry_monitor else 'disabled' }}
+          - ETCD Backup: {{ 'enabled' if enable_etcd_backup else 'disabled' }}
+          - Cluster Intelligence: {{ 'enabled' if enable_cluster_intelligence else 'disabled' }}
+          - Cost Optimization: {{ 'enabled' if enable_cost_optimization else 'disabled' }}
+          - Namespace Quota Monitor: {{ 'enabled' if enable_namespace_quota_monitor else 'disabled' }}
+          - Node Resource Monitor: {{ 'enabled' if enable_node_resource_monitor else 'disabled' }}
+          - PVC Storage Monitor: {{ 'enabled' if enable_pvc_storage_monitor else 'disabled' }}
+      when: enable_gt_operators | bool

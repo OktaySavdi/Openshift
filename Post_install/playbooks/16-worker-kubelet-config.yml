@@ -1,0 +1,97 @@
+---
+- name: Configure Worker Node Kubelet Settings
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  
+  pre_tasks:
+    - name: Test cluster connectivity
+      command: oc whoami
+      register: cluster_test
+      changed_when: false
+  
+  tasks:
+    - name: Check if Worker KubeletConfig already exists
+      kubernetes.core.k8s_info:
+        api_version: machineconfiguration.openshift.io/v1
+        kind: KubeletConfig
+        name: worker-kubelet-config
+      register: existing_kubelet_config
+      tags: [check, kubelet, worker]
+
+    - name: Display Worker KubeletConfig status
+      debug:
+        msg: |
+          Worker KubeletConfig status:
+          - Exists: {{ 'Yes' if existing_kubelet_config.resources | length > 0 else 'No' }}
+          - Creation needed: {{ 'No' if existing_kubelet_config.resources | length > 0 else 'Yes' }}
+      tags: [check, kubelet, worker]
+
+    - name: Apply Worker KubeletConfig
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/configs/machine-configs/worker-kubelet-config.yaml') | from_yaml }}"
+      when: existing_kubelet_config.resources | length == 0
+      register: kubelet_config_applied
+      tags:
+        - kubelet
+        - worker
+        - machine-config
+        - eviction
+
+    - name: Wait briefly for MachineConfigPool to start processing changes
+      pause:
+        seconds: 30
+      when: kubelet_config_applied is changed
+      tags: [verify, machine-config]
+
+    - name: Check MachineConfigPool status for degradation
+      shell: >
+        oc get mcp worker -o jsonpath='{.metadata.name}{" "}{.status.conditions[?(@.type=="Updated")].status}{" "}{.status.conditions[?(@.type=="Updating")].status}{" "}{.status.conditions[?(@.type=="Degraded")].status}'
+      register: mcp_status_check
+      changed_when: false
+      tags: [verify, machine-config]
+
+    - name: Display MachineConfigPool status
+      debug:
+        msg: |
+          Worker MachineConfigPool Status:
+          {% set parts = mcp_status_check.stdout.split() %}
+          - Pool: {{ parts[0] if parts|length > 0 else 'Unknown' }}
+          - Updated: {{ parts[1] if parts|length > 1 else 'Unknown' }}
+          - Updating: {{ parts[2] if parts|length > 2 else 'Unknown' }}
+          - Degraded: {{ parts[3] if parts|length > 3 else 'Unknown' }}
+          
+          Note: MachineConfigPool may still be updating in the background. Node reboots will continue automatically.
+      tags: [verify]
+
+    - name: Verify no MachineConfigPool degradation
+      assert:
+        that:
+          - mcp_status_check.stdout is defined
+          - mcp_status_check.stdout.split() | length > 0
+          - mcp_status_check.stdout is not search('True False True')
+          - mcp_status_check.stdout is not search('False False True')
+        fail_msg: |
+          Worker MachineConfigPool degradation detected! Please check:
+          oc get mcp worker
+          oc describe mcp worker
+        success_msg: "Worker MachineConfigPool is healthy - no degradation detected. Updates will continue in background."
+      tags: [verify]
+
+    - name: Display completion notice
+      debug:
+        msg: |
+          ✓ Worker Kubelet configuration applied successfully
+          ✓ No MachineConfigPool degradation detected
+          
+          Note: Node updates may still be in progress. To monitor:
+            oc get mcp worker
+            oc get nodes
+          
+          Worker nodes will automatically reboot one at a time to apply the kubelet configuration.
+      tags: [verify]

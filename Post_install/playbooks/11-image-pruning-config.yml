@@ -1,0 +1,115 @@
+---
+- name: Configure image registry pruning settings
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    enable_image_pruning_config: "{{ enable_image_pruning | default(true) }}"
+
+  pre_tasks:
+    - name: Test cluster connectivity
+      shell: oc whoami
+      register: cluster_test
+      changed_when: false
+
+  tasks:
+    - name: Configure image registry pruning
+      when: enable_image_pruning_config | bool
+      block:
+        - name: Check current image pruner configuration
+          k8s_info:
+            api_version: imageregistry.operator.openshift.io/v1
+            kind: ImagePruner
+            name: cluster
+          register: current_pruner_config
+
+        - name: Display current pruning configuration
+          debug:
+            msg: |
+              Current Image Pruner Settings:
+              Schedule: {{ current_pruner_config.resources[0].spec.schedule | default('Not set') }}
+              Keep Tag Revisions: {{ current_pruner_config.resources[0].spec.keepTagRevisions | default('Not set') }}
+              Keep Younger Than: {{ current_pruner_config.resources[0].spec.keepYoungerThan | default('Not set') }}
+              Suspend: {{ current_pruner_config.resources[0].spec.suspend | default('Not set') }}
+          when: current_pruner_config.resources | length > 0
+
+        - name: Check if configuration matches desired state
+          set_fact:
+            pruner_config_matches: >-
+              {{
+                current_pruner_config.resources | length > 0 and
+                current_pruner_config.resources[0].spec.schedule | default('') == image_pruner_schedule and
+                current_pruner_config.resources[0].spec.keepTagRevisions | default(0) == image_pruner_keep_tag_revisions and
+                current_pruner_config.resources[0].spec.keepYoungerThan | default(0) == image_pruner_keep_younger_than and
+                current_pruner_config.resources[0].spec.suspend | default(false) == image_pruner_suspend
+              }}
+          when: current_pruner_config.resources | length > 0
+
+        - name: Display configuration comparison
+          debug:
+            msg: |
+              Configuration comparison:
+              - Current matches desired: {{ 'Yes' if pruner_config_matches | default(false) else 'No' }}
+              - Update needed: {{ 'No' if pruner_config_matches | default(false) else 'Yes' }}
+          when: current_pruner_config.resources | length > 0
+
+        - name: Configure image pruner settings
+          k8s:
+            definition:
+              apiVersion: imageregistry.operator.openshift.io/v1
+              kind: ImagePruner
+              metadata:
+                name: cluster
+              spec:
+                failedJobsHistoryLimit: "{{ image_pruner_failed_jobs_limit }}"
+                ignoreInvalidImageReferences: "{{ image_pruner_ignore_invalid_refs }}"
+                logLevel: "{{ image_pruner_log_level }}"
+                successfulJobsHistoryLimit: "{{ image_pruner_successful_jobs_limit }}"
+                suspend: "{{ image_pruner_suspend }}"
+                schedule: "{{ image_pruner_schedule }}"
+                keepTagRevisions: "{{ image_pruner_keep_tag_revisions }}"
+                keepYoungerThan: "{{ image_pruner_keep_younger_than }}"
+            merge_type: merge
+            state: present
+          register: pruner_update
+          when: not (pruner_config_matches | default(false))
+
+        - name: Verify image pruner configuration
+          k8s_info:
+            api_version: imageregistry.operator.openshift.io/v1
+            kind: ImagePruner
+            name: cluster
+          register: updated_pruner_config
+
+        - name: Display updated pruning configuration
+          debug:
+            msg: |
+              ✅ Image Pruning Configuration Complete!
+              
+              Updated Settings:
+              - Schedule: {{ updated_pruner_config.resources[0].spec.schedule }}
+              - Keep Tag Revisions: {{ updated_pruner_config.resources[0].spec.keepTagRevisions }}
+              - Keep Younger Than: {{ updated_pruner_config.resources[0].spec.keepYoungerThan }} hours
+              - Failed Jobs History Limit: {{ updated_pruner_config.resources[0].spec.failedJobsHistoryLimit }}
+              - Successful Jobs History Limit: {{ updated_pruner_config.resources[0].spec.successfulJobsHistoryLimit }}
+              - Suspend: {{ updated_pruner_config.resources[0].spec.suspend }}
+              - Log Level: {{ updated_pruner_config.resources[0].spec.logLevel }}
+              - Ignore Invalid References: {{ updated_pruner_config.resources[0].spec.ignoreInvalidImageReferences }}
+              
+              Image pruning will run automatically according to the configured schedule.
+
+        - name: Check image pruner job status
+          shell: oc get jobs -n openshift-image-registry -l openshift.io/deployer-pod-for.name=image-pruner
+          register: pruner_jobs
+          failed_when: false
+          changed_when: false
+
+        - name: Display pruner job information
+          debug:
+            msg: |
+              Recent Image Pruner Jobs:
+              {{ pruner_jobs.stdout_lines | default(['No recent pruning jobs found']) | join('\n') }}
+          when: pruner_jobs.rc == 0

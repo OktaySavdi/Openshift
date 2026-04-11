@@ -1,0 +1,99 @@
+---
+- name: Enable kdump for kernel crash dumps
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+    - ../inventory/group_vars/all.yml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  
+  tasks:
+    - name: Check if kdump is enabled in configuration
+      ansible.builtin.assert:
+        that:
+          - enable_kdump is defined
+          - enable_kdump | bool
+          - kdump_crash_kernel_memory is defined
+          - kdump_target_pools is defined
+        fail_msg: "kdump configuration is not properly defined in vars/all_vars.yaml"
+        success_msg: "kdump configuration validated successfully"
+
+    - name: Display kdump configuration
+      ansible.builtin.debug:
+        msg:
+          - "kdump will be enabled with the following configuration:"
+          - "  Crash kernel memory: {{ kdump_crash_kernel_memory }}"
+          - "  Target pools: {{ kdump_target_pools | join(', ') }}"
+          - "  Dump path: {{ kdump_path | default('/var/crash') }}"
+          - "  Disk quota: {{ kdump_disk_quota | default('2048') }}MB (prevents disk exhaustion)"
+          - "  Compression: enabled (makedumpfile -l -d 31)"
+
+    - name: Prepare kdump.conf content
+      ansible.builtin.set_fact:
+        kdump_conf_content: "{{ lookup('template', '../templates/configs/machine-configs/kdump.conf.j2') }}"
+
+    - name: Create kdump MachineConfig for each target pool
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/configs/machine-configs/99-kdump-config.yaml.j2') }}"
+      loop: "{{ kdump_target_pools }}"
+      loop_control:
+        loop_var: kdump_role
+      register: kdump_mc_result
+
+    - name: Display MachineConfig creation results
+      ansible.builtin.debug:
+        msg: "MachineConfig 99-{{ item.kdump_role }}-kdump: {{ 'created' if item.changed else 'already exists' }}"
+      loop: "{{ kdump_mc_result.results }}"
+      loop_control:
+        label: "{{ item.kdump_role }}"
+
+    - name: Wait for MachineConfigPools to start updating
+      ansible.builtin.pause:
+        seconds: 10
+        prompt: "Waiting for MachineConfigPools to detect new configuration..."
+
+    - name: Check MachineConfigPool status
+      kubernetes.core.k8s_info:
+        api_version: machineconfiguration.openshift.io/v1
+        kind: MachineConfigPool
+        name: "{{ item }}"
+      loop: "{{ kdump_target_pools }}"
+      register: mcp_status
+
+    - name: Display MachineConfigPool status
+      ansible.builtin.debug:
+        msg:
+          - "MachineConfigPool: {{ item.resources[0].metadata.name }}"
+          - "  Total machines: {{ item.resources[0].status.machineCount }}"
+          - "  Updated: {{ item.resources[0].status.updatedMachineCount }}"
+          - "  Ready: {{ item.resources[0].status.readyMachineCount }}"
+          - "  Updating: {{ item.resources[0].status.updatedMachineCount < item.resources[0].status.machineCount }}"
+      loop: "{{ mcp_status.results }}"
+      loop_control:
+        label: "{{ item.resources[0].metadata.name }}"
+
+    - name: Information about MachineConfigPool updates
+      ansible.builtin.debug:
+        msg:
+          - "Note: MachineConfigPools will update nodes one by one."
+          - "This process includes:"
+          - "  1. Draining the node"
+          - "  2. Applying the new kernel arguments"
+          - "  3. Rebooting the node"
+          - "  4. Enabling kdump service"
+          - ""
+          - "To monitor the update progress, run:"
+          - "  oc get mcp {{ kdump_target_pools | join(' ') }} -w"
+          - ""
+          - "To verify kdump is enabled on a node after update:"
+          - "  oc debug node/<node-name> -- chroot /host systemctl status kdump"
+          - "  oc debug node/<node-name> -- chroot /host cat /proc/cmdline | grep crashkernel"
+          - "  oc debug node/<node-name> -- chroot /host cat /etc/kdump.conf"
+          - ""
+          - "To check disk usage and crash dump location:"
+          - "  oc debug node/<node-name> -- chroot /host ls -lh /var/crash/"
+          - "  oc debug node/<node-name> -- chroot /host df -h /var/crash"
+          - ""
+          - "Warning: This will cause node reboots! Ensure proper scheduling and maintenance windows."

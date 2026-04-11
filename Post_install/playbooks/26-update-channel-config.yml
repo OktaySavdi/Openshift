@@ -1,0 +1,141 @@
+---
+- name: Configure OpenShift cluster update channel
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+  pre_tasks:
+    - name: Test cluster connectivity
+      shell: oc whoami
+      register: cluster_test
+      changed_when: false
+
+    - name: Display cluster connection info
+      debug:
+        msg: "Connected to cluster as: {{ cluster_test.stdout }}"
+
+  tasks:
+    - name: Configure cluster update channel
+      when: enable_update_channel | default(false) | bool
+      block:
+        - name: Get current cluster version information
+          k8s_info:
+            api_version: config.openshift.io/v1
+            kind: ClusterVersion
+            name: version
+          register: current_clusterversion
+
+        - name: Display current cluster version details
+          debug:
+            msg: |
+              Current Cluster Version Information:
+              - Version: {{ current_clusterversion.resources[0].status.desired.version | default('Unknown') }}
+              - Channel: {{ current_clusterversion.resources[0].spec.channel | default('Not set') }}
+              - Update Available: {{ 'Yes' if (current_clusterversion.resources[0].status.availableUpdates is defined and current_clusterversion.resources[0].status.availableUpdates != None and current_clusterversion.resources[0].status.availableUpdates | length > 0) else 'No' }}
+              - Upstream: {{ current_clusterversion.resources[0].spec.upstream | default('Not set') }}
+
+        - name: Set current channel fact
+          set_fact:
+            current_channel: "{{ current_clusterversion.resources[0].spec.channel | default('') }}"
+
+        - name: Display channel configuration status
+          debug:
+            msg: |
+              Channel Configuration:
+              - Current Channel: {{ current_channel if current_channel != '' else 'Not configured' }}
+              - Desired Channel: {{ update_channel }}
+              - Update Required: {{ 'Yes' if current_channel != update_channel else 'No' }}
+
+        - name: Configure cluster update channel
+          when: current_channel != update_channel
+          k8s:
+            definition:
+              apiVersion: config.openshift.io/v1
+              kind: ClusterVersion
+              metadata:
+                name: version
+              spec:
+                channel: "{{ update_channel }}"
+                upstream: "{{ update_service_upstream }}"
+            merge_type: merge
+            state: present
+          register: channel_update
+
+        - name: Wait for channel configuration to be applied
+          when: channel_update is changed
+          k8s_info:
+            api_version: config.openshift.io/v1
+            kind: ClusterVersion
+            name: version
+          register: channel_verify
+          retries: 10
+          delay: 3
+          until:
+            - channel_verify.resources | length > 0
+            - channel_verify.resources[0].spec.channel == update_channel
+
+        - name: Get available updates after channel change
+          when: channel_update is changed
+          shell: oc adm upgrade
+          register: available_updates
+          changed_when: false
+          failed_when: false
+
+        - name: Display available updates
+          when: channel_update is changed
+          debug:
+            msg: |
+              Update Channel Configuration Complete:
+              - New Channel: {{ update_channel }}
+              - Upstream: {{ update_service_upstream }}
+              
+              Available Updates:
+              {{ available_updates.stdout }}
+
+        - name: Channel already configured
+          when: current_channel == update_channel
+          debug:
+            msg: |
+              Update channel already configured to: {{ update_channel }}
+              No changes required.
+
+        - name: Get cluster operators status
+          shell: oc get clusteroperators
+          register: co_status
+          changed_when: false
+
+        - name: Display cluster operators status
+          debug:
+            msg: |
+              Cluster Operators Status:
+              {{ co_status.stdout }}
+
+      rescue:
+        - name: Display error message
+          debug:
+            msg: |
+              ERROR: Failed to configure update channel
+              Please check:
+              1. Cluster connectivity
+              2. Admin permissions
+              3. Channel name is valid (stable-4.x, fast-4.x, eus-4.x)
+              4. Network connectivity to {{ update_service_upstream }}
+
+        - name: Fail the playbook
+          fail:
+            msg: "Update channel configuration failed"
+
+  post_tasks:
+    - name: Summary
+      debug:
+        msg: |
+          ========================================
+          Update Channel Configuration Summary
+          ========================================
+          Cluster: {{ cluster_name | default('Unknown') }}
+          Update Channel: {{ update_channel }}
+          Status: {{ 'Configured' if channel_update is changed else 'Already configured' }}
+          ========================================

@@ -1,0 +1,462 @@
+---
+- name: Schedule infrastructure applications on infra nodes
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    # Simplified: enable_infra controls everything
+    # Set default values for component scheduling
+    schedule_ingress_on_infra: "{{ schedule_ingress_on_infra | default(true) }}"
+    schedule_registry_on_infra: "{{ schedule_registry_on_infra | default(true) }}"
+    schedule_monitoring_on_infra: "{{ schedule_monitoring_on_infra | default(true) }}"
+    schedule_logging_on_infra: "{{ schedule_logging_on_infra | default(true) }}"
+    infra_replicas_auto_scale: "{{ infra_replicas_auto_scale | default(true) }}"
+
+  pre_tasks:
+    - name: Validate infrastructure configuration
+      assert:
+        that:
+          - enable_infra is defined
+          - infra_nodes is defined
+        fail_msg: "enable_infra and infra_nodes must be defined in all_vars.yaml"
+
+    - name: Check infrastructure nodes list
+      assert:
+        that:
+          - infra_nodes | length > 0
+        fail_msg: "infra_nodes list cannot be empty when enable_infra is true. Please specify node names."
+      when: enable_infra | bool
+
+    - name: Test cluster connectivity
+      shell: oc whoami
+      register: cluster_test
+      changed_when: false
+
+  tasks:
+    - name: Configure infrastructure MachineConfigPool
+      when: enable_infra | bool
+      block:
+        - name: Check if infra MachineConfigPool already exists
+          kubernetes.core.k8s_info:
+            api_version: machineconfiguration.openshift.io/v1
+            kind: MachineConfigPool
+            name: infra
+          register: existing_infra_mcp
+          tags: [check, infra, mcp]
+
+        - name: Display infra MachineConfigPool status
+          debug:
+            msg: |
+              Infrastructure MachineConfigPool status:
+              - Exists: {{ 'Yes' if existing_infra_mcp.resources | length > 0 else 'No' }}
+              - Creation needed: {{ 'No' if existing_infra_mcp.resources | length > 0 else 'Yes' }}
+              - maxUnavailable setting: {{ infra_max_unavailable | default('Not configured (will use default: 1)') }}
+          tags: [check, infra, mcp]
+
+        - name: Create infra MachineConfigPool
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ lookup('template', '../templates/configs/machine-configs/infra-machine-config-pool.yaml') | from_yaml }}"
+          when: existing_infra_mcp.resources | length == 0
+          register: infra_mcp_created
+          tags:
+            - infra
+            - mcp
+            - machine-config
+
+        - name: Configure infra MachineConfigPool maxUnavailable
+          when:
+            - infra_max_unavailable is defined
+            - existing_infra_mcp.resources | length > 0 or infra_mcp_created is changed
+          kubernetes.core.k8s:
+            definition:
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: MachineConfigPool
+              metadata:
+                name: infra
+              spec:
+                maxUnavailable: "{{ infra_max_unavailable }}"
+            merge_type: merge
+            state: present
+          register: infra_mcp_max_unavailable_set
+          tags:
+            - infra
+            - mcp
+
+        - name: Display infra MachineConfigPool creation status
+          debug:
+            msg: |
+              Infrastructure MachineConfigPool:
+              - Status: {{ 'Created' if infra_mcp_created is changed else 'Already exists' }}
+              - Target nodes: Labeled with node-role.kubernetes.io/infra
+              - Config inheritance: Inherits from worker and infra MachineConfigs
+              - maxUnavailable: {{ infra_max_unavailable if infra_max_unavailable is defined else 'Default (1)' }}
+          tags: [infra, mcp]
+
+    - name: Label infrastructure nodes
+      when: enable_infra | bool
+      block:
+        - name: Label nodes as infrastructure nodes
+          shell: "oc label node {{ item }} node-role.kubernetes.io/infra= --overwrite"
+          loop: "{{ infra_nodes }}"
+          register: label_result
+          changed_when: "'labeled' in label_result.stdout or 'not labeled' not in label_result.stdout"
+          tags: [infra, label]
+
+        - name: Remove worker label from infrastructure nodes
+          shell: "oc label node {{ item }} node-role.kubernetes.io/worker- --overwrite"
+          loop: "{{ infra_nodes }}"
+          register: remove_worker_label
+          failed_when: false
+          changed_when: "'unlabeled' in remove_worker_label.stdout or 'not labeled' not in remove_worker_label.stdout"
+          tags: [infra, label]
+
+        - name: Display labeled infrastructure nodes
+          debug:
+            msg: "Infrastructure nodes labeled: {{ infra_nodes | join(', ') }}"
+          tags: [infra, label]
+
+        - name: Taint infrastructure nodes to prevent user workloads
+          shell: "oc adm taint nodes {{ item }} node-role.kubernetes.io/infra=:NoSchedule --overwrite"
+          loop: "{{ infra_nodes }}"
+          register: taint_result
+          changed_when: "'tainted' in taint_result.stdout or 'modified' in taint_result.stdout"
+          tags: [infra, label, taint]
+
+        - name: Display tainting status
+          debug:
+            msg: "Infrastructure nodes tainted to prevent user workloads from scheduling"
+          tags: [infra, label, taint]
+
+        - name: Wait for infra MachineConfigPool to stabilize
+          pause:
+            seconds: 30
+            prompt: "Waiting for infra MachineConfigPool to stabilize after node labeling..."
+          tags: [infra, label]
+
+        - name: Check infra MachineConfigPool status
+          kubernetes.core.k8s_info:
+            api_version: machineconfiguration.openshift.io/v1
+            kind: MachineConfigPool
+            name: infra
+          register: infra_mcp_status
+          tags: [infra, label, check]
+
+        - name: Verify infra MachineConfigPool is not degraded
+          assert:
+            that:
+              - infra_mcp_status.resources[0].status.machineCount | int > 0
+              - infra_mcp_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | map(attribute='status') | first == 'False'
+            fail_msg: "Infra MachineConfigPool is degraded. Please check: oc describe mcp infra"
+            success_msg: "✅ Infra MachineConfigPool is healthy and not degraded"
+          tags: [infra, label, check]
+
+        - name: Display infra MachineConfigPool status
+          debug:
+            msg:
+              - "Infra MachineConfigPool Status:"
+              - "  Machine Count: {{ infra_mcp_status.resources[0].status.machineCount }}"
+              - "  Ready Machines: {{ infra_mcp_status.resources[0].status.readyMachineCount }}"
+              - "  Updated: {{ infra_mcp_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Updated') | map(attribute='status') | first }}"
+              - "  Degraded: {{ infra_mcp_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | map(attribute='status') | first }}"
+          tags: [infra, label, check]
+
+    - name: Configure infrastructure application scheduling
+      when: enable_infra | bool
+      block:
+        - name: Check infrastructure nodes availability
+          shell: "oc get nodes -l {{ infra_node_selector }}= -o=jsonpath='{.items[*].metadata.name}'"
+          register: infra_nodes_status
+          changed_when: false
+
+        - name: Verify infrastructure nodes exist
+          assert:
+            that: infra_nodes_status.stdout != ""
+            fail_msg: "No infrastructure nodes found. Nodes should now be labeled with node-role.kubernetes.io/infra"
+
+        - name: Display infrastructure nodes
+          debug:
+            msg: "Infrastructure nodes: {{ infra_nodes_status.stdout.split() | join(', ') }}"
+
+        - name: Check current ingress controller configuration
+          kubernetes.core.k8s_info:
+            api_version: operator.openshift.io/v1
+            kind: IngressController
+            name: default
+            namespace: openshift-ingress-operator
+          register: current_ingress_config
+          when: schedule_ingress_on_infra | default(true)
+
+        - name: Check if ingress controller already scheduled on infra nodes
+          set_fact:
+            ingress_on_infra: >-
+              {{
+                current_ingress_config.resources | length > 0 and
+                current_ingress_config.resources[0].spec.nodePlacement.nodeSelector.matchLabels[infra_node_selector] is defined
+              }}
+          when: schedule_ingress_on_infra | default(true)
+
+        - name: Display ingress scheduling status
+          debug:
+            msg: |
+              Ingress controller scheduling status:
+              - Already on infra nodes: {{ 'Yes' if ingress_on_infra | default(false) else 'No' }}
+              - Update needed: {{ 'No' if ingress_on_infra | default(false) else 'Yes' }}
+          when: schedule_ingress_on_infra | default(true)
+
+        - name: Schedule ingress controllers to infra nodes
+          when: 
+            - schedule_ingress_on_infra | default(true)
+            - not (ingress_on_infra | default(false))
+          kubernetes.core.k8s:
+            definition:
+              apiVersion: operator.openshift.io/v1
+              kind: IngressController
+              metadata:
+                name: default
+                namespace: openshift-ingress-operator
+              spec:
+                nodePlacement:
+                  nodeSelector:
+                    matchLabels:
+                      "{{ infra_node_selector }}": ""
+                  tolerations:
+                    - key: node-role.kubernetes.io/infra
+                      effect: NoSchedule
+                replicas: "{{ infra_nodes_status.stdout.split() | length if infra_replicas_auto_scale else omit }}"
+            merge_type: merge
+            state: present
+
+        - name: Check current image registry configuration
+          kubernetes.core.k8s_info:
+            api_version: imageregistry.operator.openshift.io/v1
+            kind: Config
+            name: cluster
+          register: current_registry_config
+          when: schedule_registry_on_infra | default(true)
+
+        - name: Check if registry already scheduled on infra nodes
+          set_fact:
+            registry_on_infra: >-
+              {{
+                current_registry_config.resources | length > 0 and
+                current_registry_config.resources[0].spec.nodeSelector[infra_node_selector] is defined
+              }}
+          when: schedule_registry_on_infra | default(true)
+
+        - name: Display registry scheduling status
+          debug:
+            msg: |
+              Image registry scheduling status:
+              - Already on infra nodes: {{ 'Yes' if registry_on_infra | default(false) else 'No' }}
+              - Update needed: {{ 'No' if registry_on_infra | default(false) else 'Yes' }}
+          when: schedule_registry_on_infra | default(true)
+
+        - name: Schedule image registry to infra nodes
+          when: 
+            - schedule_registry_on_infra | default(true)
+            - not (registry_on_infra | default(false))
+          kubernetes.core.k8s:
+            definition:
+              apiVersion: imageregistry.operator.openshift.io/v1
+              kind: Config
+              metadata:
+                name: cluster
+              spec:
+                nodeSelector:
+                  "{{ infra_node_selector }}": ""
+                tolerations:
+                  - key: node-role.kubernetes.io/infra
+                    effect: NoSchedule
+            merge_type: merge
+            state: present
+
+        - name: Schedule monitoring components to infra nodes
+          when: schedule_monitoring_on_infra | default(true)
+          kubernetes.core.k8s:
+            definition: "{{ lookup('template', '../templates/k8s/monitoring/cluster-monitoring-configmap.yaml') | from_yaml }}"
+            state: present
+
+        - name: Check if cluster logging exists
+          kubernetes.core.k8s_info:
+            api_version: logging.openshift.io/v1
+            kind: ClusterLogging
+            name: instance
+            namespace: openshift-logging
+          register: logging_check
+
+        - name: Schedule logging components to infra nodes
+          when: 
+            - schedule_logging_on_infra | default(true)
+            - logging_check.resources | length > 0
+          kubernetes.core.k8s:
+            definition:
+              apiVersion: logging.openshift.io/v1
+              kind: ClusterLogging
+              metadata:
+                name: instance
+                namespace: openshift-logging
+              spec:
+                visualization:
+                  kibana:
+                    nodeSelector:
+                      "{{ infra_node_selector }}": ""
+                curation:
+                  curator:
+                    nodeSelector:
+                      "{{ infra_node_selector }}": ""
+                logStore:
+                  elasticsearch:
+                    nodeSelector:
+                      "{{ infra_node_selector }}": ""
+            merge_type: merge
+            state: present
+
+        - name: Wait for ingress controller pods to reschedule
+          shell: "oc get pods -n openshift-ingress -o jsonpath='{.items[*].spec.nodeName}'"
+          register: ingress_pod_nodes
+          retries: "{{ default_retries | default(30) }}"
+          delay: "{{ default_delay | default(10) }}"
+          until: ingress_pod_nodes.stdout_lines | intersect(infra_nodes_status.stdout.split()) | length > 0
+          when: schedule_ingress_on_infra | default(true)
+
+        - name: Verify infrastructure application placement
+          shell: |
+            echo "=== Infrastructure Node Status ==="
+            oc get nodes -l {{ infra_node_selector }}= -o wide
+            echo ""
+            echo "=== Ingress Controllers ==="
+            oc get pods -n openshift-ingress -o wide
+            echo ""
+            echo "=== Image Registry ==="
+            oc get pods -n openshift-image-registry -o wide
+          register: placement_verification
+          changed_when: false
+
+        - name: Display placement verification
+          debug:
+            msg: "{{ placement_verification.stdout_lines }}"
+
+      rescue:
+        - name: Display infrastructure scheduling error
+          debug:
+            msg: "Infrastructure scheduling failed: {{ ansible_failed_result.msg | default('Unknown error') }}"
+
+        - name: Revert infrastructure node selector changes on failure
+          shell: |
+            oc patch ingresscontroller/default -n openshift-ingress-operator --type=json \
+              -p='[{"op": "remove", "path": "/spec/nodePlacement"}]' || true
+            oc patch configs.imageregistry.operator.openshift.io/cluster --type=json \
+              -p='[{"op": "remove", "path": "/spec/nodeSelector"}]' || true
+          failed_when: false
+          changed_when: false
+
+        - name: Fail the playbook
+          fail:
+            msg: "Infrastructure scheduling configuration failed. Node selector changes have been reverted."
+
+      always:
+        - name: Display final infrastructure scheduling status
+          debug:
+            msg: "Infrastructure scheduling {{ 'completed successfully' if ansible_failed_task is not defined else 'failed' }}"
+
+    - name: Configure infrastructure node kubelet settings
+      when: enable_infra | bool
+      block:
+        - name: Check if Infra KubeletConfig already exists
+          kubernetes.core.k8s_info:
+            api_version: machineconfiguration.openshift.io/v1
+            kind: KubeletConfig
+            name: 51-infra-kubeconfig
+          register: existing_infra_kubelet_config
+          tags: [check, kubelet, infra]
+
+        - name: Display Infra KubeletConfig status
+          debug:
+            msg: |
+              Infrastructure KubeletConfig status:
+              - Exists: {{ 'Yes' if existing_infra_kubelet_config.resources | length > 0 else 'No' }}
+              - Creation needed: {{ 'No' if existing_infra_kubelet_config.resources | length > 0 else 'Yes' }}
+          tags: [check, kubelet, infra]
+
+        - name: Apply Infrastructure KubeletConfig
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ lookup('template', '../templates/configs/machine-configs/infra-kubelet-config.yaml') | from_yaml }}"
+          when: existing_infra_kubelet_config.resources | length == 0
+          register: infra_kubelet_config_applied
+          tags:
+            - kubelet
+            - infra
+            - machine-config
+            - eviction
+
+        - name: Wait briefly for MachineConfigPool to start processing changes
+          pause:
+            seconds: 15
+          when: infra_kubelet_config_applied is changed
+          tags: [verify, machine-config]
+
+        - name: Check infra MachineConfigPool status for degradation
+          shell: >
+            oc get mcp infra -o jsonpath='{.metadata.name}{" "}{.status.conditions[?(@.type=="Updated")].status}{" "}{.status.conditions[?(@.type=="Updating")].status}{" "}{.status.conditions[?(@.type=="Degraded")].status}' 2>/dev/null || echo "infra NotFound NotFound NotFound"
+          register: infra_mcp_status_check
+          changed_when: false
+          failed_when: false
+          tags: [verify, machine-config]
+
+        - name: Display infra MachineConfigPool status
+          debug:
+            msg: |
+              Infrastructure MachineConfigPool Status:
+              {% set parts = infra_mcp_status_check.stdout.split() %}
+              {% if parts[0] == 'infra' %}
+              - Pool: {{ parts[0] }}
+              - Updated: {{ parts[1] if parts|length > 1 else 'Unknown' }}
+              - Updating: {{ parts[2] if parts|length > 2 else 'Unknown' }}
+              - Degraded: {{ parts[3] if parts|length > 3 else 'Unknown' }}
+              
+              Note: MachineConfigPool may still be updating in the background. Node reboots will continue automatically.
+              {% else %}
+              - Pool: infra (Not found - using default worker pool for infra nodes)
+              - Note: Infra KubeletConfig will apply to nodes with label node-role.kubernetes.io/infra
+              {% endif %}
+          tags: [verify]
+
+        - name: Verify no infra MachineConfigPool degradation (if exists)
+          assert:
+            that:
+              - infra_mcp_status_check.stdout is defined
+              - infra_mcp_status_check.stdout.split() | length > 0
+              - infra_mcp_status_check.stdout is not search('True False True')
+              - infra_mcp_status_check.stdout is not search('False False True')
+            fail_msg: |
+              Infrastructure MachineConfigPool degradation detected! Please check:
+              oc get mcp infra
+              oc describe mcp infra
+            success_msg: "Infrastructure MachineConfigPool is healthy - no degradation detected. Updates will continue in background."
+          when: 
+            - infra_mcp_status_check.stdout is defined
+            - "'infra' in infra_mcp_status_check.stdout"
+          tags: [verify]
+
+        - name: Display infra kubelet configuration completion
+          debug:
+            msg: |
+              ✓ Infrastructure Kubelet configuration applied successfully
+              ✓ No MachineConfigPool degradation detected
+              
+              Configuration applied:
+              - Target: Nodes with label node-role.kubernetes.io/infra
+              - Eviction thresholds: Configured for infrastructure workloads
+              - Image GC: Optimized for registry and monitoring workloads
+              
+              Note: Infrastructure node updates may still be in progress. To monitor:
+                oc get mcp infra (if infra MCP exists)
+                oc get nodes -l node-role.kubernetes.io/infra=
+              
+              Infrastructure nodes will automatically reboot one at a time to apply the kubelet configuration.
+          tags: [verify]

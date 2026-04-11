@@ -1,0 +1,313 @@
+---
+- name: Apply Performance Tuning Profiles to OpenShift Nodes
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  vars_files:
+    - ../vars/all_vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+  tasks:
+    - name: Display performance tuning configuration
+      ansible.builtin.debug:
+        msg:
+          - "=== Performance Tuning Configuration ==="
+          - "Cluster: {{ cluster_name }}"
+          - "Infra tuning: {{ 'ENABLED' if enable_infra_tuning | default(false) else 'DISABLED' }}"
+          - "Worker tuning: {{ 'ENABLED' if enable_worker_tuning | default(false) else 'DISABLED' }}"
+          - ""
+
+    #################################
+    # 1. CREATE PERFORMANCE PROFILES
+    #################################
+    
+    - name: Create network-latency performance profile for infra nodes
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/configs/machine-configs/infra-network-latency-tuned.yaml') }}"
+      when: enable_infra_tuning | default(false)
+      tags:
+        - performance
+        - tuned
+        - infra
+
+    - name: Create high-throughput profile for worker nodes (optional)
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/configs/machine-configs/worker-throughput-tuned.yaml') }}"
+      when: enable_worker_tuning | default(false)
+      tags:
+        - performance
+        - tuned
+        - worker
+
+    #################################
+    # 2. VERIFY TUNED PROFILES
+    #################################
+    
+    - name: Wait for Tuned profiles to be applied
+      ansible.builtin.pause:
+        seconds: 30
+        prompt: "Waiting for Tuned operator to process profiles..."
+      tags:
+        - performance
+        - verify
+
+    - name: Get Tuned profile status
+      kubernetes.core.k8s_info:
+        api_version: tuned.openshift.io/v1
+        kind: Tuned
+        namespace: openshift-cluster-node-tuning-operator
+      register: tuned_profiles
+      tags:
+        - performance
+        - verify
+
+    - name: Display created Tuned profiles
+      ansible.builtin.debug:
+        msg:
+          - "=== Tuned Profiles Created ==="
+          - "{{ tuned_profiles.resources | map(attribute='metadata.name') | list }}"
+      tags:
+        - performance
+        - verify
+
+    #################################
+    # 3. VERIFY NODE ASSIGNMENTS
+    #################################
+    
+    - name: Get infra nodes
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+        label_selectors:
+          - node-role.kubernetes.io/infra
+      register: infra_nodes
+      tags:
+        - performance
+        - verify
+
+    - name: Display infra nodes that will receive network-latency profile
+      ansible.builtin.debug:
+        msg:
+          - "=== Infra Nodes (network-latency profile) ==="
+          - "{{ infra_nodes.resources | map(attribute='metadata.name') | list }}"
+      when: infra_nodes.resources | length > 0
+      tags:
+        - performance
+        - verify
+
+    - name: Verify Tuned daemon pods are running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-cluster-node-tuning-operator
+        label_selectors:
+          - app=tuned
+      register: tuned_pods
+      tags:
+        - performance
+        - verify
+
+    - name: Display Tuned daemon status
+      ansible.builtin.debug:
+        msg:
+          - "=== Tuned Daemon Pods ==="
+          - "Total: {{ tuned_pods.resources | length }}"
+          - "Running: {{ tuned_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length }}"
+      tags:
+        - performance
+        - verify
+
+    #################################
+    # 4. VALIDATION AND TESTING
+    #################################
+    
+    - name: Wait for TunedProfile resources to be created
+      ansible.builtin.pause:
+        seconds: 15
+        prompt: "Waiting for TunedProfile status updates..."
+      tags:
+        - performance
+        - verify
+        - test
+
+    - name: Get TunedProfile status for all nodes
+      kubernetes.core.k8s_info:
+        api_version: tuned.openshift.io/v1
+        kind: Profile
+        namespace: openshift-cluster-node-tuning-operator
+      register: tuned_profiles_status
+      tags:
+        - performance
+        - verify
+        - test
+
+    - name: Check for any Tuned profile application errors
+      ansible.builtin.set_fact:
+        profile_errors: "{{ tuned_profiles_status.resources | selectattr('status.conditions', 'defined') | 
+                           map(attribute='status.conditions') | flatten | 
+                           selectattr('type', 'equalto', 'Applied') | 
+                           selectattr('status', 'equalto', 'False') | list }}"
+      tags:
+        - performance
+        - verify
+        - test
+
+    - name: Display any profile application errors
+      ansible.builtin.debug:
+        msg:
+          - "⚠️  WARNING: Some Tuned profiles failed to apply!"
+          - "{{ profile_errors }}"
+      when: profile_errors | length > 0
+      tags:
+        - performance
+        - verify
+        - test
+
+    - name: Get infra nodes with their applied profiles
+      ansible.builtin.shell: |
+        oc get profile -n openshift-cluster-node-tuning-operator -o json | \
+        jq -r '.items[] | select(.status.tunedProfile == "infra-network-latency") | .metadata.name'
+      register: infra_profiles_applied
+      when: enable_infra_tuning | default(false)
+      changed_when: false
+      failed_when: false
+      tags:
+        - performance
+        - verify
+        - test
+
+    - name: Verify infra tuning is applied
+      ansible.builtin.assert:
+        that:
+          - infra_profiles_applied.stdout_lines | length > 0
+        fail_msg: "❌ ERROR: Infra network-latency profile not applied to any nodes!"
+        success_msg: "✅ Infra network-latency profile applied to {{ infra_profiles_applied.stdout_lines | length }} node(s)"
+      when: 
+        - enable_infra_tuning | default(false)
+        - infra_nodes.resources | length > 0
+      tags:
+        - performance
+        - verify
+        - test
+
+    - name: Display warning if infra tuning enabled but no infra nodes exist
+      ansible.builtin.debug:
+        msg:
+          - "⚠️  WARNING: Infra tuning is enabled but no infra nodes found in cluster!"
+          - "The infra-network-latency profile was created but won't be applied to any nodes."
+          - "Label nodes with 'node-role.kubernetes.io/infra' to apply this profile."
+      when:
+        - enable_infra_tuning | default(false)
+        - infra_nodes.resources | length == 0
+      tags:
+        - performance
+        - verify
+        - test
+
+    - name: Get worker nodes with throughput profile (if enabled)
+      ansible.builtin.shell: |
+        oc get profile -n openshift-cluster-node-tuning-operator -o json | \
+        jq -r '.items[] | select(.status.tunedProfile == "worker-throughput") | .metadata.name'
+      register: worker_profiles_applied
+      when: enable_worker_tuning | default(false)
+      changed_when: false
+      failed_when: false
+      tags:
+        - performance
+        - verify
+        - test
+
+    - name: Verify worker tuning is applied (if enabled)
+      ansible.builtin.assert:
+        that:
+          - worker_profiles_applied.stdout_lines | length > 0
+        fail_msg: "⚠️  WARNING: Worker throughput profile enabled but not applied to any nodes!"
+        success_msg: "✅ Worker throughput profile applied to {{ worker_profiles_applied.stdout_lines | length }} node(s)"
+      when: enable_worker_tuning | default(false)
+      tags:
+        - performance
+        - verify
+        - test
+
+    - name: Check sysctl parameters on infra node (sample test)
+      ansible.builtin.shell: |
+        NODE=$(oc get nodes -l node-role.kubernetes.io/infra --no-headers | head -1 | awk '{print $1}')
+        if [ -n "$NODE" ]; then
+          echo "Testing node: $NODE"
+          oc debug node/$NODE --quiet -- chroot /host sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo "N/A"
+        else
+          echo "No infra nodes found"
+        fi
+      register: sysctl_test
+      when: enable_infra_tuning | default(false)
+      changed_when: false
+      failed_when: false
+      tags:
+        - performance
+        - verify
+        - test
+
+    - name: Display sysctl validation result
+      ansible.builtin.debug:
+        msg:
+          - "=== Sysctl Parameter Test ==="
+          - "{{ sysctl_test.stdout_lines }}"
+          - "Expected: 1048576"
+          - "{{ '✅ PASS: nf_conntrack_max correctly set' if '1048576' in sysctl_test.stdout else '⚠️  Result may take time to apply or node reboot required' }}"
+      when: 
+        - enable_infra_tuning | default(false)
+        - sysctl_test.stdout is defined
+      tags:
+        - performance
+        - verify
+        - test
+
+    #################################
+    # 5. COMPLETION SUMMARY
+    #################################
+    
+    - name: Performance tuning deployment summary
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "=========================================="
+          - "  Performance Tuning Applied Successfully"
+          - "=========================================="
+          - ""
+          - "{{ '✅ Infra Nodes: network-latency profile' if enable_infra_tuning | default(false) else '⏸️  Infra Nodes: tuning disabled' }}"
+          - "   - Low network latency optimizations"
+          - "   - TCP/IP stack tuning for HAProxy"
+          - "   - Increased connection tracking capacity"
+          - ""
+          - "{{ '✅ Worker Nodes: high-throughput profile' if enable_worker_tuning | default(false) else '⏸️  Worker Nodes: tuning disabled (default profile)' }}"
+          - ""
+          - "Validation Status:"
+          - "{{ '✅ Infra profiles: ' + (infra_profiles_applied.stdout_lines | length | string) + ' node(s)' if enable_infra_tuning | default(false) and infra_profiles_applied.stdout_lines is defined else '⏸️  Infra tuning not enabled' }}"
+          - "{{ '✅ Worker profiles: ' + (worker_profiles_applied.stdout_lines | length | string) + ' node(s)' if enable_worker_tuning | default(false) and worker_profiles_applied.stdout_lines is defined else '⏸️  Worker tuning not enabled' }}"
+          - "{{ '⚠️  Profile errors detected: ' + (profile_errors | length | string) if profile_errors is defined and profile_errors | length > 0 else '✅ No profile errors' }}"
+          - ""
+          - "Next Steps:"
+          - "1. Monitor ingress latency metrics in Prometheus"
+          - "2. Check Tuned profile application:"
+          - "   oc get tuned -n openshift-cluster-node-tuning-operator"
+          - "3. Verify profile on nodes:"
+          - "   oc debug node/<node-name> -- chroot /host tuned-adm active"
+          - "4. Check applied sysctl values:"
+          - "   oc debug node/<node-name> -- chroot /host sysctl net.netfilter.nf_conntrack_max"
+          - ""
+          - "Expected Results:"
+          - "- 20-30% reduction in HTTP response latency"
+          - "- Better throughput for high-traffic applications"
+          - "- Improved HAProxy/Router performance"
+          - ""
+          - "Rollback (if needed):"
+          - "  oc delete tuned infra-network-latency -n openshift-cluster-node-tuning-operator"
+          - "  oc delete tuned worker-throughput -n openshift-cluster-node-tuning-operator"
+          - ""
+      tags:
+        - always

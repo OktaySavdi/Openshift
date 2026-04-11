@@ -1,0 +1,221 @@
+---
+- name: Configure OpenShift RBAC Roles and Bindings
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  
+  pre_tasks:
+    - name: Test cluster connectivity
+      command: oc whoami
+      register: cluster_test
+      changed_when: false
+  
+  tasks:
+    - name: Check if Custom View ClusterRole already exists
+      kubernetes.core.k8s_info:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        name: custom-view
+      register: existing_custom_view_role
+      tags: [check, rbac, custom-view]
+
+    - name: Display Custom View ClusterRole status
+      debug:
+        msg: |
+          Custom View ClusterRole status:
+          - Exists: {{ 'Yes' if existing_custom_view_role.resources | length > 0 else 'No' }}
+          - Creation needed: {{ 'No' if existing_custom_view_role.resources | length > 0 else 'Yes' }}
+      tags: [check, rbac, custom-view]
+
+    - name: Apply Custom View ClusterRole
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/k8s/rbac/custom-view-clusterrole.yml') | from_yaml }}"
+      when: existing_custom_view_role.resources | length == 0
+      tags:
+        - rbac
+        - custom-view
+        - clusterrole
+
+    - name: Check if GTOps ClusterRole already exists
+      kubernetes.core.k8s_info:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        name: gtops-role
+      register: existing_gtops_role
+      tags: [check, rbac, gtops]
+
+    - name: Display GTOps ClusterRole status
+      debug:
+        msg: |
+          GTOps ClusterRole status:
+          - Exists: {{ 'Yes' if existing_gtops_role.resources | length > 0 else 'No' }}
+          - Creation needed: {{ 'No' if existing_gtops_role.resources | length > 0 else 'Yes' }}
+      tags: [check, rbac, gtops]
+
+    - name: Apply GTOps RBAC Configuration
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ item }}"
+      loop: "{{ lookup('template', '../templates/k8s/rbac/gtops-rbac.yml') | from_yaml_all | list }}"
+      when: existing_gtops_role.resources | length == 0
+      tags:
+        - rbac
+        - gtops
+        - clusterrole
+
+    - name: Check if GTOps ClusterRoleBinding already exists
+      kubernetes.core.k8s_info:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        name: gtops-binding
+      register: existing_gtops_binding
+      tags: [check, rbac, gtops]
+
+    - name: Create GTOps ClusterRoleBinding
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: gtops-binding
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: gtops-role
+          subjects:
+          - apiGroup: rbac.authorization.k8s.io
+            kind: Group
+            name: "gtops-rb"
+      when: existing_gtops_binding.resources | length == 0
+      tags:
+        - rbac
+        - gtops
+        - clusterrolebinding
+
+    - name: Check if Custom View ClusterRoleBinding already exists
+      kubernetes.core.k8s_info:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        name: custom-view-binding
+      register: existing_custom_view_binding
+      tags: [check, rbac, custom-view]
+
+    - name: Create Custom View ClusterRoleBinding
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: custom-view-binding
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: custom-view
+          subjects:
+          - apiGroup: rbac.authorization.k8s.io
+            kind: Group
+            name: "viewers"
+      when: existing_custom_view_binding.resources | length == 0
+      tags:
+        - rbac
+        - custom-view
+        - clusterrolebinding
+
+    - name: Check if Cluster Admin binding for LDAP groups exists
+      kubernetes.core.k8s_info:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        name: cluster-admin-ldap-groups
+      register: existing_cluster_admin_binding
+      tags: [check, rbac, cluster-admin]
+
+    - name: Display Cluster Admin binding status
+      debug:
+        msg: |
+          Cluster Admin LDAP Groups binding status:
+          - Exists: {{ 'Yes' if existing_cluster_admin_binding.resources | length > 0 else 'No' }}
+          - Groups to bind: {{ cluster_admin_groups | default(['OpenShift-Admins']) | join(', ') }}
+      tags: [check, rbac, cluster-admin]
+
+    - name: Create Cluster Admin ClusterRoleBinding for LDAP groups
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: cluster-admin-ldap-groups
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-admin
+          subjects: "{{ cluster_admin_groups | default(['OpenShift-Admins']) | map('regex_replace', '^(.*)$', '{ \"apiGroup\": \"rbac.authorization.k8s.io\", \"kind\": \"Group\", \"name\": \"\\1\" }') | map('from_json') | list }}"
+      when: existing_cluster_admin_binding.resources | length == 0
+      tags:
+        - rbac
+        - cluster-admin
+        - clusterrolebinding
+
+    - name: Check if GTOps role binding for additional groups exists
+      kubernetes.core.k8s_info:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        name: gtops-additional-groups-binding
+      register: existing_gtops_additional_binding
+      tags: [check, rbac, gtops]
+
+    - name: Display GTOps additional groups binding status
+      debug:
+        msg: |
+          GTOps Additional Groups binding status:
+          - Exists: {{ 'Yes' if existing_gtops_additional_binding.resources | length > 0 else 'No' }}
+          - Groups to bind: {{ (gtops_additional_groups | default([])) | join(', ') if (gtops_additional_groups | default([])) else 'None configured' }}
+      tags: [check, rbac, gtops]
+
+    - name: Create GTOps ClusterRoleBinding for additional LDAP groups
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: gtops-additional-groups-binding
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: gtops-role
+          subjects: "{{ gtops_additional_groups | default([]) | map('regex_replace', '^(.*)$', '{ \"apiGroup\": \"rbac.authorization.k8s.io\", \"kind\": \"Group\", \"name\": \"\\1\" }') | map('from_json') | list }}"
+      when: 
+        - existing_gtops_additional_binding.resources | length == 0
+        - gtops_additional_groups is defined
+        - gtops_additional_groups is not none
+        - gtops_additional_groups | length > 0
+      tags:
+        - rbac
+        - gtops
+        - clusterrolebinding
+
+    - name: Verify all ClusterRoleBindings
+      kubernetes.core.k8s_info:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+      register: all_bindings
+      tags: [verify, rbac]
+
+    - name: Display configured RBAC bindings
+      debug:
+        msg: |
+          Configured ClusterRoleBindings:
+          {% for binding in all_bindings.resources | selectattr('metadata.name', 'in', ['gtops-binding', 'custom-view-binding', 'cluster-admin-ldap-groups', 'gtops-additional-groups-binding']) %}
+          - {{ binding.metadata.name }}:
+              Role: {{ binding.roleRef.name }}
+              Subjects: {{ binding.subjects | map(attribute='name') | list | join(', ') }}
+          {% endfor %}
+      tags: [verify, rbac]

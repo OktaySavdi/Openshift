@@ -1,0 +1,115 @@
+---
+- name: Install cert-manager operator
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+  pre_tasks:
+    - name: Verify cert-manager installation is enabled
+      assert:
+        that:
+          - enable_certificates | default(false) | bool
+        fail_msg: "Certificate management is disabled. Set enable_certificates: true to proceed"
+      tags: always
+
+  tasks:
+    - name: Check if cert-manager operator is already installed
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: cert-manager-operator
+      register: cert_manager_csv_check
+      failed_when: false
+      check_mode: no
+      tags: [check, operators]
+
+    - name: Check cert-manager subscription exists
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: openshift-cert-manager-operator
+        namespace: cert-manager-operator
+      register: cert_manager_sub_check
+      failed_when: false
+      check_mode: no
+      tags: [check, operators]
+
+    - name: Display cert-manager installation status
+      debug:
+        msg: |
+          cert-manager operator status:
+          - CSV exists: {{ 'Yes' if cert_manager_csv_check.resources | length > 0 else 'No' }}
+          - Subscription exists: {{ 'Yes' if cert_manager_sub_check.resources | length > 0 else 'No' }}
+          - Installation needed: {{ 'No' if (cert_manager_csv_check.resources | length > 0 and cert_manager_sub_check.resources | length > 0) else 'Yes' }}
+      tags: [check, operators]
+
+    - name: Apply cert-manager namespace
+      k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/cert-manager-namespace.yaml') | from_yaml }}"
+      register: cert_manager_namespace_result
+      when: cert_manager_sub_check.resources | length == 0
+      check_mode: no
+      tags: [install, operators, namespace]
+
+    - name: Apply cert-manager operator group
+      k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/cert-manager-group.yaml') | from_yaml }}"
+      register: cert_manager_group_result
+      when: cert_manager_sub_check.resources | length == 0
+      check_mode: no
+      tags: [install, operators]
+
+    - name: Apply cert-manager subscription
+      k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/cert-manager-subscription.yaml') | from_yaml }}"
+      register: cert_manager_subscription_result
+      when: cert_manager_sub_check.resources | length == 0
+      check_mode: no
+      tags: [install, operators]
+
+    - name: Wait for cert-manager operator to be ready
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: cert-manager-operator
+      register: cert_manager_csv_status
+      until: 
+        - cert_manager_csv_status.resources | length > 0
+        - cert_manager_csv_status.resources[0].status.phase is defined
+        - cert_manager_csv_status.resources[0].status.phase == "Succeeded"
+      retries: 30
+      delay: 10
+      when: cert_manager_subscription_result is changed
+      check_mode: no
+      tags: [verify, operators]
+
+    - name: Verify cert-manager pods are running
+      k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: cert-manager
+        label_selectors:
+          - "app.kubernetes.io/name=cert-manager"
+      register: cert_manager_pods
+      until:
+        - cert_manager_pods.resources | length > 0
+        - cert_manager_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length == cert_manager_pods.resources | length
+      retries: 45
+      delay: 10
+      when: cert_manager_subscription_result is changed
+      check_mode: no
+      tags: [verify, operators]
+
+    - name: Display cert-manager final status
+      debug:
+        msg: |
+          cert-manager installation complete!
+          - Installation skipped: {{ 'Yes (already installed)' if cert_manager_sub_check.resources | length > 0 else 'No (fresh installation)' }}
+          - Operator pods ready: {{ cert_manager_pods.resources | length if cert_manager_pods.resources is defined else 'Already running' }}
+      tags: [verify, operators]

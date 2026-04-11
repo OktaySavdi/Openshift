@@ -1,0 +1,175 @@
+---
+- name: Configure OpenShift Logging Operator and ClusterLogForwarder
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  
+  pre_tasks:
+    - name: Test cluster connectivity
+      command: oc whoami
+      register: cluster_test
+      changed_when: false
+  
+  tasks:
+    - name: Check if openshift-logging namespace already exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: openshift-logging
+      register: existing_logging_namespace
+      tags: [check, logging, namespace]
+
+    - name: Display logging namespace status
+      debug:
+        msg: |
+          Logging namespace status:
+          - Exists: {{ 'Yes' if existing_logging_namespace.resources | length > 0 else 'No' }}
+          - Creation needed: {{ 'No' if existing_logging_namespace.resources | length > 0 else 'Yes' }}
+      tags: [check, logging, namespace]
+
+    - name: Create openshift-logging namespace
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/k8s/operators/logging-operator-namespace.yaml') | from_yaml }}"
+      when: existing_logging_namespace.resources | length == 0
+      tags:
+        - logging
+        - namespace
+        - operators
+
+    - name: Check if logging operator subscription already exists
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: cluster-logging
+        namespace: openshift-logging
+      register: existing_logging_subscription
+      tags: [check, logging, operators]
+
+    - name: Display logging operator subscription status
+      debug:
+        msg: |
+          Logging operator subscription status:
+          - Exists: {{ 'Yes' if existing_logging_subscription.resources | length > 0 else 'No' }}
+          - Installation needed: {{ 'No' if existing_logging_subscription.resources | length > 0 else 'Yes' }}
+      tags: [check, logging, operators]
+
+    - name: Create logging operator group
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/k8s/operators/logging-operator-group.yaml') | from_yaml }}"
+      when: existing_logging_subscription.resources | length == 0
+      tags:
+        - logging
+        - operator-group
+        - operators
+
+    - name: Create logging operator subscription
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', '../templates/k8s/operators/logging-operator-subscription.yaml') | from_yaml }}"
+      register: logging_subscription_result
+      when: existing_logging_subscription.resources | length == 0
+      tags:
+        - logging
+        - subscription
+        - operators
+
+    - name: Wait for logging operator to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: cluster-logging-operator
+        namespace: openshift-logging
+      register: logging_operator_status
+      until:
+        - logging_operator_status.resources | length > 0
+        - logging_operator_status.resources[0].status.availableReplicas is defined
+        - logging_operator_status.resources[0].status.availableReplicas > 0
+      retries: 45
+      delay: 10
+      tags:
+        - logging
+        - operators
+        - wait
+
+    - name: Display logging operator readiness
+      debug:
+        msg: |
+          Logging operator status:
+          - Deployment: {{ logging_operator_status.resources[0].metadata.name if logging_operator_status.resources | length > 0 else 'Not found' }}
+          - Available replicas: {{ logging_operator_status.resources[0].status.availableReplicas | default(0) }}
+          - Status: {{ 'Ready' if logging_operator_status.resources | length > 0 and logging_operator_status.resources[0].status.availableReplicas | default(0) > 0 else 'Not ready' }}
+          
+          Note: OpenShift Logging v6.x uses ClusterLogForwarder directly (no ClusterLogging instance needed).
+      tags: [verify, logging]
+
+    - name: Deploy HTTP log forwarding configuration
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ item }}"
+      loop: "{{ lookup('template', '../templates/k8s/logging/logforwarding_http.yml') | from_yaml_all | list }}"
+      register: log_forwarder_result
+      tags:
+        - logging
+        - log-forwarding
+        - http-forward
+
+    - name: Wait briefly for log forwarder to initialize
+      pause:
+        seconds: 15
+      when: log_forwarder_result is changed
+      tags: [verify, logging]
+
+    - name: Wait for logging collector pods to be running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-logging
+        label_selectors:
+          - "app.kubernetes.io/component=collector"
+      register: collector_pods
+      until:
+        - collector_pods.resources | length > 0
+        - collector_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length > 0
+      retries: 30
+      delay: 10
+      failed_when: false
+      tags: [verify, logging]
+
+    - name: Verify logging collector pods are running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-logging
+      register: logging_pods
+      tags: [verify, logging]
+
+    - name: Display logging infrastructure status
+      debug:
+        msg: |
+          Logging infrastructure pods:
+          {% for pod in logging_pods.resources %}
+          - {{ pod.metadata.name }}: {{ pod.status.phase | default('Unknown') }}
+          {% endfor %}
+          
+          Total pods: {{ logging_pods.resources | length }}
+          Running pods: {{ logging_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length }}
+          Collector pods: {{ collector_pods.resources | length if collector_pods.resources is defined else 0 }}
+      tags: [verify, logging]
+
+    - name: Verify at least one collector pod is running
+      assert:
+        that:
+          - logging_pods.resources | length > 0
+          - logging_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length > 0
+        fail_msg: |
+          No logging pods are running! Please check:
+          oc get pods -n openshift-logging
+          oc describe clusterlogforwarder -n openshift-logging
+        success_msg: "Logging infrastructure is healthy - {{ logging_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length }} pod(s) running"
+      tags: [verify, logging]

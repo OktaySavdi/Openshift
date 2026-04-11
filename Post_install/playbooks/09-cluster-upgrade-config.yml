@@ -1,0 +1,181 @@
+---
+- name: Configure cluster upgrade settings for multi-node rolling updates
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    enable_cluster_upgrade_config: "{{ enable_upgrade_optimization | default(true) }}"
+
+  pre_tasks:
+    - name: Test cluster connectivity
+      shell: oc whoami
+      register: cluster_test
+      changed_when: false
+
+  tasks:
+    - name: Configure machine config pool upgrade settings
+      when: enable_cluster_upgrade_config | bool
+      block:
+        - name: Get all machine config pools
+          k8s_info:
+            api_version: machineconfiguration.openshift.io/v1
+            kind: MachineConfigPool
+          register: mcp_list
+
+        - name: Display current machine config pools
+          debug:
+            msg: "Found MCPs: {{ mcp_list.resources | map(attribute='metadata.name') | list | join(', ') }}"
+
+        - name: Check current worker MCP maxUnavailable setting
+          set_fact:
+            current_worker_max_unavailable: "{{ (mcp_list.resources | selectattr('metadata.name', 'equalto', 'worker') | map(attribute='spec.maxUnavailable') | first) | default('1') }}"
+          when: "'worker' in (mcp_list.resources | map(attribute='metadata.name') | list)"
+
+        - name: Check current master MCP maxUnavailable setting
+          set_fact:
+            current_master_max_unavailable: "{{ (mcp_list.resources | selectattr('metadata.name', 'equalto', 'master') | map(attribute='spec.maxUnavailable') | first) | default('1') }}"
+          when: "'master' in (mcp_list.resources | map(attribute='metadata.name') | list)"
+
+        - name: Display current MCP maxUnavailable settings
+          debug:
+            msg: |
+              Current MCP maxUnavailable settings:
+              - Worker: {{ current_worker_max_unavailable | default('Not set') }} (desired: {{ worker_max_unavailable | default('Not configured') }})
+              - Master: {{ current_master_max_unavailable | default('Not set') }} (desired: {{ master_max_unavailable | default('Not configured') }})
+              - Worker update needed: {{ 'Yes' if (worker_max_unavailable is defined and current_worker_max_unavailable | default('1') != worker_max_unavailable | string) else 'No' }}
+              - Master update needed: {{ 'Yes' if (master_max_unavailable is defined and current_master_max_unavailable | default('1') != master_max_unavailable | string) else 'No' }}
+
+        - name: Configure worker MCP maxUnavailable
+          when: 
+            - worker_max_unavailable is defined
+            - "'worker' in (mcp_list.resources | map(attribute='metadata.name') | list)"
+            - current_worker_max_unavailable | default('1') != worker_max_unavailable | string
+          k8s:
+            definition:
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: MachineConfigPool
+              metadata:
+                name: worker
+              spec:
+                maxUnavailable: "{{ worker_max_unavailable }}"
+            merge_type: merge
+            state: present
+          register: worker_mcp_update
+
+        - name: Verify worker MCP maxUnavailable configuration
+          k8s_info:
+            api_version: machineconfiguration.openshift.io/v1
+            kind: MachineConfigPool
+            name: worker
+          register: worker_mcp_verify
+          when: worker_mcp_update is changed
+          retries: 5
+          delay: 2
+          until:
+            - worker_mcp_verify.resources | length > 0
+            - worker_mcp_verify.resources[0].spec.maxUnavailable is defined
+            - worker_mcp_verify.resources[0].spec.maxUnavailable | string == worker_max_unavailable | string
+
+        - name: Display worker MCP verification
+          debug:
+            msg: |
+              Worker MCP maxUnavailable verification:
+              - Configured value: {{ worker_mcp_verify.resources[0].spec.maxUnavailable }}
+              - Expected value: {{ worker_max_unavailable }}
+              - Status: {{ 'SUCCESS' if worker_mcp_verify.resources[0].spec.maxUnavailable | string == worker_max_unavailable | string else 'FAILED' }}
+              - Unavailable Machine Count: {{ worker_mcp_verify.resources[0].status.unavailableMachineCount | default(0) }}
+              - Machine Count: {{ worker_mcp_verify.resources[0].status.machineCount | default(0) }}
+          when: worker_mcp_update is changed
+
+        - name: Configure master MCP maxUnavailable
+          when: 
+            - master_max_unavailable is defined
+            - "'master' in (mcp_list.resources | map(attribute='metadata.name') | list)"
+            - current_master_max_unavailable | default('1') != master_max_unavailable | string
+          k8s:
+            definition:
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: MachineConfigPool
+              metadata:
+                name: master
+              spec:
+                maxUnavailable: "{{ master_max_unavailable }}"
+            merge_type: merge
+            state: present
+          register: master_mcp_update
+
+        - name: Verify master MCP maxUnavailable configuration
+          k8s_info:
+            api_version: machineconfiguration.openshift.io/v1
+            kind: MachineConfigPool
+            name: master
+          register: master_mcp_verify
+          when: master_mcp_update is changed
+          retries: 5
+          delay: 2
+          until:
+            - master_mcp_verify.resources | length > 0
+            - master_mcp_verify.resources[0].spec.maxUnavailable is defined
+            - master_mcp_verify.resources[0].spec.maxUnavailable | string == master_max_unavailable | string
+
+        - name: Display master MCP verification
+          debug:
+            msg: |
+              Master MCP maxUnavailable verification:
+              - Configured value: {{ master_mcp_verify.resources[0].spec.maxUnavailable }}
+              - Expected value: {{ master_max_unavailable }}
+              - Status: {{ 'SUCCESS' if master_mcp_verify.resources[0].spec.maxUnavailable | string == master_max_unavailable | string else 'FAILED' }}
+              - Unavailable Machine Count: {{ master_mcp_verify.resources[0].status.unavailableMachineCount | default(0) }}
+              - Machine Count: {{ master_mcp_verify.resources[0].status.machineCount | default(0) }}
+          when: master_mcp_update is changed
+
+        - name: Verify MCP configurations
+          k8s_info:
+            api_version: machineconfiguration.openshift.io/v1
+            kind: MachineConfigPool
+          register: updated_mcp_list
+
+        - name: Display MCP upgrade configurations
+          debug:
+            msg: |
+              MCP Name: {{ item.metadata.name }}
+              Max Unavailable (spec): {{ item.spec.maxUnavailable | default('1 (default)') }}
+              Unavailable Machine Count (status): {{ item.status.unavailableMachineCount | default(0) }}
+              Ready Machines: {{ item.status.readyMachineCount | default(0) }}
+              Total Machines: {{ item.status.machineCount | default(0) }}
+              Updated: {{ item.status.updatedMachineCount | default(0) }}
+              
+              Note: unavailableMachineCount reflects actual unavailable nodes during an update.
+                    It will be 0 when no update is in progress.
+                    maxUnavailable controls how many can be unavailable during updates.
+          loop: "{{ updated_mcp_list.resources }}"
+
+        - name: Assert maxUnavailable settings are correct
+          assert:
+            that:
+              - worker_mcp_verify.resources[0].spec.maxUnavailable | string == worker_max_unavailable | string
+            fail_msg: "Worker MCP maxUnavailable not set correctly. Expected: {{ worker_max_unavailable }}, Got: {{ worker_mcp_verify.resources[0].spec.maxUnavailable }}"
+            success_msg: "Worker MCP maxUnavailable configured successfully: {{ worker_max_unavailable }}"
+          when: 
+            - worker_mcp_update is changed
+            - worker_max_unavailable is defined
+
+        - name: Assert master maxUnavailable settings are correct
+          assert:
+            that:
+              - master_mcp_verify.resources[0].spec.maxUnavailable | string == master_max_unavailable | string
+            fail_msg: "Master MCP maxUnavailable not set correctly. Expected: {{ master_max_unavailable }}, Got: {{ master_mcp_verify.resources[0].spec.maxUnavailable }}"
+            success_msg: "Master MCP maxUnavailable configured successfully: {{ master_max_unavailable }}"
+          when: 
+            - master_mcp_update is changed
+            - master_max_unavailable is defined
+
+        - name: Check cluster version and upgrade status
+          k8s_info:
+            api_version: config.openshift.io/v1
+            kind: ClusterVersion
+            name: version
+          register: cluster_version

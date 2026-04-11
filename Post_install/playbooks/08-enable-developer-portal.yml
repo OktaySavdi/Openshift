@@ -1,0 +1,88 @@
+---
+- name: Enable OpenShift Developer Portal
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    enable_developer_portal: "{{ enable_dev_portal | default(true) }}"
+
+  tasks:
+    - name: Check current developer portal configuration
+      k8s_info:
+        api_version: operator.openshift.io/v1
+        kind: Console
+        name: cluster
+      register: current_console_config
+      when: enable_developer_portal | bool
+      check_mode: no
+      tags: [check, console]
+
+    - name: Check if developer perspective is already enabled
+      set_fact:
+        dev_perspective_enabled: >-
+          {{
+            current_console_config.resources | length > 0 and
+            current_console_config.resources[0].spec.customization.perspectives | default([]) | 
+            selectattr('id', 'equalto', 'dev') |
+            selectattr('visibility.state', 'equalto', 'Enabled') | 
+            list | length > 0
+          }}
+      when: enable_developer_portal | bool
+
+    - name: Display developer portal status
+      debug:
+        msg: |
+          Developer portal status:
+          - Already enabled: {{ 'Yes' if dev_perspective_enabled | default(false) else 'No' }}
+          - Configuration needed: {{ 'No' if dev_perspective_enabled | default(false) else 'Yes' }}
+      when: enable_developer_portal | bool
+      tags: [check, console]
+
+    - name: Enable developer perspective in OpenShift console
+      when: 
+        - enable_developer_portal | bool
+        - not (dev_perspective_enabled | default(false))
+      k8s:
+        api_version: operator.openshift.io/v1
+        kind: Console
+        name: cluster
+        definition:
+          spec:
+            customization:
+              perspectives:
+                - id: "dev"
+                  visibility:
+                    state: "Enabled"
+        merge_type: merge
+        state: present
+      check_mode: no
+      tags: [configure, console]
+
+    - name: Verify developer portal configuration
+      k8s_info:
+        api_version: operator.openshift.io/v1
+        kind: Console
+        name: cluster
+      register: console_config
+      when: enable_developer_portal | bool
+      check_mode: no
+      tags: [verify, console]
+
+    - name: Display console configuration status
+      debug:
+        msg: |
+          Developer portal configuration applied successfully!
+          
+          Current perspectives:
+          {{ console_config.resources[0].spec.customization.perspectives | default([]) | to_nice_json }}
+          
+          The developer perspective is now enabled in the OpenShift web console.
+          Users can switch between Administrator and Developer views using the perspective switcher.
+      when: 
+        - enable_developer_portal | bool
+        - console_config.resources is defined
+        - console_config.resources | length > 0
+      tags: [verify, console]

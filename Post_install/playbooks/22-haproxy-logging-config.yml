@@ -1,0 +1,93 @@
+---
+# Playbook: Enable HAProxy Access Logging
+# Purpose: Configure OpenShift Ingress Controller to enable HAProxy access logs
+# Logs: Accessible via 'oc logs -n openshift-ingress <router-pod-name>'
+
+- name: Enable HAProxy access logging for OpenShift Ingress
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+    - ../inventory/group_vars/all.yml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  
+  tasks:
+    - name: Check current IngressController configuration
+      kubernetes.core.k8s_info:
+        api_version: operator.openshift.io/v1
+        kind: IngressController
+        name: default
+        namespace: openshift-ingress-operator
+      register: ingress_controller_current
+
+    - name: Display current logging configuration
+      ansible.builtin.debug:
+        msg: "Current logging: {{ ingress_controller_current.resources[0].spec.logging | default('Not configured') }}"
+      when: ingress_controller_current.resources | length > 0
+
+    - name: Enable HAProxy access logging
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operator.openshift.io/v1
+          kind: IngressController
+          metadata:
+            name: default
+            namespace: openshift-ingress-operator
+          spec:
+            logging:
+              access:
+                destination:
+                  type: Container
+                httpLogFormat: >-
+                  %ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %CC %CS %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %{+Q}r
+      register: haproxy_logging_result
+
+    - name: Wait for router pods to restart
+      ansible.builtin.pause:
+        seconds: 15
+        prompt: "Waiting for router pods to restart with new logging configuration..."
+      when: haproxy_logging_result.changed
+
+    - name: Get router pods
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-ingress
+        label_selectors:
+          - ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default
+      register: router_pods
+      when: haproxy_logging_result.changed
+
+    - name: Display router pods status
+      ansible.builtin.debug:
+        msg: "Router pod {{ item.metadata.name }} is {{ item.status.phase }}"
+      loop: "{{ router_pods.resources }}"
+      when:
+        - haproxy_logging_result.changed
+        - router_pods.resources is defined
+
+    - name: HAProxy logging configuration summary
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          HAProxy Access Logging Enabled
+          ========================================
+          Status: {{ 'Updated' if haproxy_logging_result.changed else 'Already configured' }}
+          
+          View logs with:
+          oc logs -n openshift-ingress <router-pod-name> -c router
+          
+          Follow logs:
+          oc logs -n openshift-ingress -l ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default -c router -f
+          
+          Log format includes:
+          - Client IP and port
+          - Timestamp
+          - Frontend/backend names
+          - Response times
+          - HTTP status code
+          - Bytes transferred
+          - Full HTTP request
+          ========================================

@@ -1,0 +1,211 @@
+---
+- name: Install Compliance Operator
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+  pre_tasks:
+    - name: Verify compliance operator installation is enabled
+      assert:
+        that:
+          - enable_compliance_operator | default(false) | bool
+        fail_msg: "Compliance Operator is disabled. Set enable_compliance_operator: true to proceed"
+      tags: always
+
+  tasks:
+    - name: Check if compliance operator is already installed
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: openshift-compliance
+      register: compliance_csv_check
+      failed_when: false
+      check_mode: no
+      tags: [check, operators]
+
+    - name: Check compliance operator subscription exists
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: compliance-operator
+        namespace: openshift-compliance
+      register: compliance_sub_check
+      failed_when: false
+      check_mode: no
+      tags: [check, operators]
+
+    - name: Display compliance operator installation status
+      debug:
+        msg: |
+          Compliance Operator status:
+          - CSV exists: {{ 'Yes' if compliance_csv_check.resources | length > 0 else 'No' }}
+          - Subscription exists: {{ 'Yes' if compliance_sub_check.resources | length > 0 else 'No' }}
+          - Installation needed: {{ 'No' if (compliance_csv_check.resources | length > 0 and compliance_sub_check.resources | length > 0) else 'Yes' }}
+      tags: [check, operators]
+
+    - name: Apply compliance operator namespace
+      k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/compliance-operator-namespace.yaml') | from_yaml }}"
+      register: compliance_namespace_result
+      when: compliance_sub_check.resources | length == 0
+      check_mode: no
+      tags: [install, operators, namespace]
+
+    - name: Apply compliance operator group
+      k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/compliance-operator-group.yaml') | from_yaml }}"
+      register: compliance_group_result
+      when: compliance_sub_check.resources | length == 0
+      check_mode: no
+      tags: [install, operators]
+
+    - name: Apply compliance operator subscription
+      k8s:
+        state: present
+        definition: "{{ lookup('file', '../templates/k8s/operators/compliance-operator-subscription.yaml') | from_yaml }}"
+      register: compliance_subscription_result
+      when: compliance_sub_check.resources | length == 0
+      check_mode: no
+      tags: [install, operators]
+
+    - name: Wait for compliance operator to be ready
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: openshift-compliance
+      register: compliance_csv_status
+      until: 
+        - compliance_csv_status.resources | length > 0
+        - compliance_csv_status.resources[0].status.phase is defined
+        - compliance_csv_status.resources[0].status.phase == "Succeeded"
+      retries: 30
+      delay: 10
+      when: compliance_subscription_result is changed
+      check_mode: no
+      tags: [verify, operators]
+
+    - name: Verify compliance operator pods are running
+      k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-compliance
+        label_selectors:
+          - "name=compliance-operator"
+      register: compliance_pods
+      until:
+        - compliance_pods.resources | length > 0
+        - compliance_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length == compliance_pods.resources | length
+      retries: 45
+      delay: 10
+      when: compliance_subscription_result is changed
+      check_mode: no
+      tags: [verify, operators]
+
+    - name: Wait for compliance profiles to be available
+      shell: oc get profiles.compliance -n openshift-compliance --no-headers | wc -l
+      register: profiles_count
+      retries: 20
+      delay: 15
+      until: profiles_count.stdout | int > 0
+      changed_when: false
+      when: compliance_subscription_result is changed
+      check_mode: no
+      tags: [verify, profiles]
+
+    - name: Display compliance operator final status
+      debug:
+        msg: |
+          Compliance Operator installation complete!
+          - Installation skipped: {{ 'Yes (already installed)' if compliance_sub_check.resources | length > 0 else 'No (fresh installation)' }}
+          - Operator pods ready: {{ compliance_pods.resources | length if compliance_pods.resources is defined else 'Already running' }}
+          - Profiles available: {{ profiles_count.stdout if profiles_count.stdout is defined else 'N/A' }}
+      tags: [verify, operators]
+
+    #################################
+    # CONFIGURE CIS SCANNING
+    #################################
+    - name: Configure CIS benchmark scanning
+      when: enable_cis_scanning | default(true) | bool
+      block:
+        - name: Create CIS scan setting
+          k8s:
+            state: present
+            definition: "{{ lookup('template', '../templates/k8s/scans/compliance-cis-scan-setting.yaml.j2') }}"
+          register: cis_scan_setting
+          tags: [configure, cis]
+
+        - name: Create CIS scan binding
+          k8s:
+            state: present
+            definition: "{{ lookup('template', '../templates/k8s/scans/compliance-cis-scan-binding.yaml.j2') }}"
+          register: cis_scan_binding
+          tags: [configure, cis]
+
+        - name: Wait for CIS scan to initialize
+          k8s_info:
+            api_version: compliance.openshift.io/v1alpha1
+            kind: ComplianceScan
+            namespace: openshift-compliance
+          register: cis_scans
+          retries: 10
+          delay: 5
+          until: cis_scans.resources | length > 0
+          when: cis_scan_binding is changed
+          check_mode: no
+          tags: [verify, cis]
+
+        - name: Display CIS scan status
+          debug:
+            msg: |
+              CIS benchmark scanning configured
+              Schedule: {{ cis_scan_schedule | default('0 2 * * 0') }}
+              Auto-apply remediations: {{ compliance_auto_apply_remediations | default(false) }}
+              Auto-update remediations: {{ compliance_auto_update_remediations | default(true) }}
+          tags: [verify, cis]
+
+    #################################
+    # CONFIGURE PCI-DSS SCANNING
+    #################################
+    - name: Configure PCI-DSS scanning
+      when: enable_pci_dss_scanning | default(false) | bool
+      block:
+        - name: Create PCI-DSS scan setting
+          k8s:
+            state: present
+            definition: "{{ lookup('template', '../templates/k8s/scans/compliance-pci-dss-scan-setting.yaml.j2') }}"
+          register: pci_scan_setting
+          tags: [configure, pci]
+
+        - name: Create PCI-DSS scan binding
+          k8s:
+            state: present
+            definition: "{{ lookup('template', '../templates/k8s/scans/compliance-pci-dss-scan-binding.yaml.j2') }}"
+          register: pci_scan_binding
+          tags: [configure, pci]
+
+        - name: Wait for PCI-DSS scan to initialize
+          k8s_info:
+            api_version: compliance.openshift.io/v1alpha1
+            kind: ComplianceScan
+            namespace: openshift-compliance
+          register: pci_scans
+          retries: 10
+          delay: 5
+          until: pci_scans.resources | length > 0
+          when: pci_scan_binding is changed
+          check_mode: no
+          tags: [verify, pci]
+
+        - name: Display PCI-DSS scan status
+          debug:
+            msg: |
+              PCI-DSS scanning configured
+              Schedule: {{ pci_dss_scan_schedule | default('0 2 * * 0') }}
+              Auto-apply remediations: {{ compliance_auto_apply_remediations | default(false) }}
+              Auto-update remediations: {{ compliance_auto_update_remediations | default(true) }}
+          tags: [verify, pci]

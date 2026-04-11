@@ -1,0 +1,190 @@
+---
+# Main playbook for OpenShift post-installation configuration
+# Uses single variable file: vars/all_vars.yaml
+
+- name: Load variables and gather facts
+  hosts: localhost
+  gather_facts: true
+  vars_files:
+    - vars/all_vars.yaml
+    - inventory/group_vars/all.yml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  tasks:
+    - name: Secure vault password file if it exists
+      file:
+        path: "{{ playbook_dir }}/.vault_pass"
+        mode: '0600'
+      when: lookup('fileglob', playbook_dir + '/.vault_pass', errors='ignore') | length > 0
+      check_mode: no
+      tags: always
+      failed_when: false
+
+    - name: Ensure logs directory exists
+      file:
+        path: logs
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+      check_mode: no
+      tags: always
+
+    - name: Test cluster connectivity
+      shell: oc whoami
+      register: cluster_connectivity
+      changed_when: false
+      check_mode: no
+      tags: always
+
+    - name: Display cluster information
+      debug:
+        msg: "Configuring OpenShift cluster: {{ cluster_name }} (Connected as: {{ cluster_connectivity.stdout }})"
+      tags: always
+
+- name: Validate OpenShift prerequisites before configuration
+  import_playbook: playbooks/00-validate-prerequisites.yml
+  when: 
+    - run_validation | default(true)
+    - ansible_run_tags is not defined or 'never' in ansible_run_tags or ansible_run_tags | length == 0
+  tags: [always, validate]
+
+- name: Install cert-manager operator
+  import_playbook: playbooks/01-cert-manager.yml
+  when: enable_certificates | default(false)
+  tags: [cert-manager, operators]
+
+- name: Configure API certificate
+  import_playbook: playbooks/02-manage-certificate.yml
+  when: enable_certificates | default(false)
+  tags: [certificates, api, ingress]
+
+- name: Configure egress IP for cluster
+  import_playbook: playbooks/03-egress-ip.yml
+  when: enable_egress_ip | default(false)
+  tags: [network, egress]
+
+- name: Configure LDAP authentication
+  import_playbook: playbooks/04-ldap-config.yml
+  when: enable_ldap | default(false)
+  tags: [auth, ldap]
+
+- name: Configure LDAP group sync
+  import_playbook: playbooks/05-ldap-groupsync.yml
+  when: enable_ldap_group_sync | default(false)
+  tags: [auth, ldap, groupsync]
+
+  # Note: Skipping machine sets for baremetal - nodes are pre-existing
+- name: Label existing baremetal nodes (optional)
+  import_playbook: playbooks/06-node-labeling.yml
+  when: enable_machine_labeling | default(false)
+  tags: [nodes, labeling, baremetal]
+
+- name: Configure Chrony NTP synchronization
+  import_playbook: playbooks/07-chrony-config.yml
+  when: enable_chrony | default(true)
+  tags: [ntp, chrony, time]
+
+- name: Enable developer portal in console
+  import_playbook: playbooks/08-enable-developer-portal.yml
+  when: enable_dev_portal | default(true)
+  tags: [console, developer, ui]
+
+- name: Configure cluster upgrade settings
+  import_playbook: playbooks/09-cluster-upgrade-config.yml
+  when: enable_upgrade_optimization | default(true)
+  tags: [upgrade, mcp, optimization]
+
+- name: Schedule infrastructure applications on infra nodes
+  import_playbook: playbooks/10-infra-scheduling.yml
+  tags: [infrastructure, scheduling]
+
+- name: Configure image registry pruning
+  import_playbook: playbooks/11-image-pruning-config.yml
+  when: enable_image_pruning | default(true)
+  tags: [registry, pruning, storage]
+
+- name: Disable self provisioning
+  import_playbook: playbooks/12-disable-self-provisioning.yml
+  when: disable_self_provisioning | default(true)
+  tags: [security, provisioning]
+
+- name: Configure cluster proxy settings
+  import_playbook: playbooks/13-proxy-config.yml
+  when: enable_cluster_proxy | default(false)
+  tags: [proxy, network, security]
+
+- name: Configure image registry storage
+  import_playbook: playbooks/14-registry-storage-config.yml
+  when: enable_registry_storage | default(true)
+  tags: [registry, storage, pvc]
+
+- name: Configure RBAC roles and bindings
+  import_playbook: playbooks/15-rbac-config.yml
+  tags: [rbac, security, permissions]
+
+- name: Configure worker node kubelet settings
+  import_playbook: playbooks/16-worker-kubelet-config.yml
+  tags: [kubelet, worker, machine-config, eviction]
+
+- name: Configure DNS performance tuning
+  import_playbook: playbooks/17-dns-tuning-config.yml
+  tags: [dns, tuning, performance, sysctl]
+
+- name: Configure OpenShift logging and log forwarding
+  import_playbook: playbooks/18-logging-config.yml
+  when: enable_log_forwarding | default(false)
+  tags: [logging, operators, log-forwarding]
+
+- name: Deploy GT Operators
+  import_playbook: playbooks/19-deploy-operators.yml
+  when: enable_gt_operators | default(true)
+  tags: [operators, gt-operators]
+
+- name: Remove worker label from master nodes
+  import_playbook: playbooks/24-remove-worker-label-from-masters.yml
+  tags: [node-labels, master, cleanup]
+
+- name: Configure SSH authorized keys for node access
+  import_playbook: playbooks/21-ssh-config.yml
+  when: enable_ssh_keys | default(false)
+  tags: [ssh, security, machine-config, nodes]
+
+- name: Enable HAProxy access logging
+  import_playbook: playbooks/22-haproxy-logging-config.yml
+  when: enable_haproxy_logging | default(false)
+  tags: [haproxy, logging, ingress]
+
+- name: Enable kdump for kernel crash dumps
+  import_playbook: playbooks/23-enable-kdump.yml
+  when: enable_kdump | default(false)
+  tags: [kdump, kernel, crash-dumps, machine-config]
+
+- name: Apply Performance Tuning Profiles
+  import_playbook: playbooks/20-performance-tuning.yml
+  tags: [performance, tuning]
+
+- name: Deploy OpenCost for Cost Analysis
+  import_playbook: playbooks/25-opencost-deployment.yml
+  when: enable_opencost | default(false)
+  tags: [opencost, cost-optimization, monitoring]
+
+- name: Configure cluster update channel
+  import_playbook: playbooks/26-update-channel-config.yml
+  when: enable_update_channel | default(false)
+  tags: [upgrade, update-channel, cluster-version]
+
+- name: Deploy Compliance Operator and CIS scanning
+  import_playbook: playbooks/27-compliance-operator.yml
+  when: enable_compliance_operator | default(false)
+  tags: [compliance, security, cis, pci-dss]
+
+- name: Deploy Falco Runtime Security
+  import_playbook: playbooks/28-falco-security.yml
+  when: enable_falco | default(false)
+  tags: [security, falco, runtime-security]
+
+- name: Deploy OPA Gatekeeper for Policy Enforcement
+  import_playbook: playbooks/29-gatekeeper-policies.yml
+  when: enable_gatekeeper | default(false)
+  tags: [security, gatekeeper, policy, opa]

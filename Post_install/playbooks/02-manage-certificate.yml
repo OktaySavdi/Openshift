@@ -1,0 +1,450 @@
+---
+- name: Configure API and Ingress certificates via cert-manager
+  hosts: localhost
+  gather_facts: true
+  vars_files:
+    - ../vars/all_vars.yaml
+    - ../vars/vault.yml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    ca_bundle_file: "../certs/ca-bundle.crt"
+    api_hostname: "api.{{ cluster_domain }}"
+    apps_hostname: "*.apps.{{ cluster_domain }}"
+
+  pre_tasks:
+    - name: Create temporary directory for CA files in /tmp
+      file:
+        path: "/tmp/ansible-ca-{{ ansible_date_time.epoch }}"
+        state: directory
+        mode: '0700'
+      register: temp_ca_dir
+      check_mode: no
+
+    - name: Write CA certificate from vault to temporary file
+      copy:
+        content: "{{ vault_ca_cert }}\n"
+        dest: "{{ temp_ca_dir.path }}/ca.crt"
+        mode: '0644'
+      check_mode: no
+
+    - name: Write CA key from vault to temporary file
+      copy:
+        content: "{{ vault_ca_key }}\n"
+        dest: "{{ temp_ca_dir.path }}/ca.key"
+        mode: '0600'
+      check_mode: no
+      no_log: true
+
+    - name: Verify CA certificate file is valid
+      shell: openssl x509 -in "{{ temp_ca_dir.path }}/ca.crt" -noout -text
+      register: cert_verify
+      failed_when: cert_verify.rc != 0
+      changed_when: false
+      check_mode: no
+
+    - name: Verify CA key file is valid (PKCS#8 or RSA format)
+      shell: openssl pkey -in "{{ temp_ca_dir.path }}/ca.key" -check -noout
+      register: key_verify
+      failed_when: key_verify.rc != 0
+      changed_when: false
+      check_mode: no
+      no_log: true
+
+    - name: Set CA file paths
+      set_fact:
+        ca_cert_file: "{{ temp_ca_dir.path }}/ca.crt"
+        ca_key_file: "{{ temp_ca_dir.path }}/ca.key"
+
+    - name: Verify certificate bundle file exists
+      stat:
+        path: "{{ ca_bundle_file }}"
+      register: ca_bundle_check
+      failed_when: not ca_bundle_check.stat.exists
+
+    - name: Test cluster connectivity
+      shell: oc whoami
+      register: cluster_test
+      changed_when: false
+
+    - name: Verify cert-manager is installed
+      shell: oc get pods -n cert-manager
+      register: cert_manager_check
+      changed_when: false
+      failed_when: cert_manager_check.rc != 0
+
+  tasks:
+    - name: Setup cert-manager CA root secret
+      block:
+        - name: Check if CA root secret exists
+          shell: oc get secret ca-root-secret -n cert-manager -o name
+          register: ca_secret_check
+          failed_when: false
+          changed_when: false
+
+        - name: Get existing CA secret content if exists
+          k8s_info:
+            api_version: v1
+            kind: Secret
+            name: ca-root-secret
+            namespace: cert-manager
+          register: existing_ca_secret
+          when: ca_secret_check.rc == 0
+
+        - name: Display CA secret status
+          debug:
+            msg: |
+              CA root secret status:
+              - Exists: {{ 'Yes' if ca_secret_check.rc == 0 else 'No' }}
+              - Creation needed: {{ 'No' if ca_secret_check.rc == 0 else 'Yes' }}
+
+        - name: Create CA root secret in cert-manager namespace
+          shell: >
+            oc -n cert-manager create secret tls ca-root-secret 
+            --cert="{{ ca_cert_file }}" 
+            --key="{{ ca_key_file }}"
+          when: ca_secret_check.rc != 0
+          register: ca_secret_creation
+
+        - name: Check if custom CA configmap exists
+          k8s_info:
+            api_version: v1
+            kind: ConfigMap
+            name: custom-ca
+            namespace: openshift-config
+          register: existing_ca_configmap
+
+        - name: Display custom CA configmap status
+          debug:
+            msg: |
+              Custom CA configmap status:
+              - Exists: {{ 'Yes' if existing_ca_configmap.resources | length > 0 else 'No' }}
+              - Creation needed: {{ 'No' if existing_ca_configmap.resources | length > 0 else 'Yes' }}
+
+        - name: Create custom CA configmap for proxy configuration
+          shell: >
+            oc create configmap custom-ca 
+            --from-file="{{ ca_bundle_file }}" 
+            -n openshift-config
+          register: ca_configmap_creation
+          when: existing_ca_configmap.resources | length == 0
+          failed_when: false
+
+        - name: Check proxy configuration for trusted CA
+          k8s_info:
+            api_version: config.openshift.io/v1
+            kind: Proxy
+            name: cluster
+          register: current_proxy_config
+
+        - name: Patch proxy cluster configuration with trusted CA
+          shell: >
+            oc patch proxy/cluster 
+            --type=merge 
+            --patch='{"spec":{"trustedCA":{"name":"custom-ca"}}}'
+          register: proxy_patch
+          when: 
+            - ca_configmap_creation is changed or existing_ca_configmap.resources | length > 0
+            - current_proxy_config.resources[0].spec.trustedCA.name | default('') != 'custom-ca'
+
+    - name: Configure ClusterIssuer
+      block:
+        - name: Check if ClusterIssuer already exists
+          k8s_info:
+            api_version: cert-manager.io/v1
+            kind: ClusterIssuer
+            name: ca-issuer
+          register: existing_cluster_issuer
+
+        - name: Display ClusterIssuer status
+          debug:
+            msg: |
+              ClusterIssuer status:
+              - Exists: {{ 'Yes' if existing_cluster_issuer.resources | length > 0 else 'No' }}
+              - Ready: {{ existing_cluster_issuer.resources[0].status.conditions[0].status if existing_cluster_issuer.resources | length > 0 else 'N/A' }}
+              - Creation needed: {{ 'No' if existing_cluster_issuer.resources | length > 0 else 'Yes' }}
+
+        - name: Create ClusterIssuer
+          k8s:
+            state: present
+            definition: "{{ lookup('template', '../templates/k8s/certificates/cluster-issuer.yaml') | from_yaml }}"
+          register: cluster_issuer_creation
+          when: existing_cluster_issuer.resources | length == 0
+
+        - name: Wait for ClusterIssuer to be ready
+          shell: oc get clusterissuer ca-issuer -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+          register: issuer_status
+          retries: "{{ default_retries | default(30) }}"
+          delay: "{{ default_delay | default(10) }}"
+          until: issuer_status.stdout == "True"
+          when: cluster_issuer_creation is changed
+
+    - name: Configure Ingress certificate
+      block:
+        - name: Check if ingress certificate already exists
+          k8s_info:
+            api_version: cert-manager.io/v1
+            kind: Certificate
+            name: ingress-cert
+            namespace: openshift-ingress
+          register: existing_ingress_cert
+
+        - name: Check ingress controller certificate configuration
+          k8s_info:
+            api_version: operator.openshift.io/v1
+            kind: IngressController
+            name: default
+            namespace: openshift-ingress-operator
+          register: current_ingress_controller
+
+        - name: Display ingress certificate status
+          debug:
+            msg: |
+              Ingress certificate status:
+              - Certificate exists: {{ 'Yes' if existing_ingress_cert.resources | length > 0 else 'No' }}
+              - Certificate ready: {{ existing_ingress_cert.resources[0].status.conditions[0].status if existing_ingress_cert.resources | length > 0 else 'N/A' }}
+              - IngressController configured: {{ 'Yes' if current_ingress_controller.resources[0].spec.defaultCertificate.name | default('') == 'custom-certs-managed-ingress' else 'No' }}
+              - Configuration needed: {{ 'No' if (existing_ingress_cert.resources | length > 0 and current_ingress_controller.resources[0].spec.defaultCertificate.name | default('') == 'custom-certs-managed-ingress') else 'Yes' }}
+
+        - name: Create ingress certificate
+          k8s:
+            state: present
+            definition: "{{ lookup('template', '../templates/k8s/certificates/ingress-certificate.yaml') | from_yaml }}"
+          register: ingress_cert_creation
+          when: existing_ingress_cert.resources | length == 0
+
+        - name: Wait for ingress certificate to be ready
+          shell: >
+            oc get certificate ingress-cert -n openshift-ingress 
+            -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+          register: ingress_cert_status
+          retries: "{{ default_retries | default(30) }}"
+          delay: "{{ default_delay | default(10) }}"
+          until: ingress_cert_status.stdout == "True"
+          when: ingress_cert_creation is changed
+
+        - name: Verify ingress certificate exists in openshift-ingress namespace
+          kubernetes.core.k8s_info:
+            api_version: cert-manager.io/v1
+            kind: Certificate
+            name: ingress-cert
+            namespace: openshift-ingress
+          register: ingress_cert_verify
+          failed_when: ingress_cert_verify.resources | length == 0
+
+        - name: Display ingress certificate verification
+          debug:
+            msg: |
+              Ingress certificate verification:
+              - Name: {{ ingress_cert_verify.resources[0].metadata.name }}
+              - Namespace: {{ ingress_cert_verify.resources[0].metadata.namespace }}
+              - Ready: {{ ingress_cert_verify.resources[0].status.conditions[0].status if ingress_cert_verify.resources[0].status.conditions is defined else 'Unknown' }}
+              - Secret Name: {{ ingress_cert_verify.resources[0].spec.secretName }}
+
+        - name: Patch ingress controller with custom certificate
+          shell: >
+            oc --namespace openshift-ingress-operator patch --type=merge 
+            ingresscontrollers/default 
+            --patch '{"spec":{"defaultCertificate":{"name":"custom-certs-managed-ingress"}}}'
+          register: ingress_patch
+          when: current_ingress_controller.resources[0].spec.defaultCertificate.name | default('') != 'custom-certs-managed-ingress'
+
+        - name: Wait for ingress operator to stabilize after certificate change
+          kubernetes.core.k8s_info:
+            api_version: config.openshift.io/v1
+            kind: ClusterOperator
+            name: ingress
+          register: ingress_co_status
+          until:
+            - ingress_co_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length > 0
+            - ingress_co_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'False') | list | length > 0
+            - ingress_co_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Progressing') | selectattr('status', 'equalto', 'False') | list | length > 0
+          retries: 60
+          delay: 10
+          when: ingress_patch is changed
+
+    - name: Configure API certificate
+      block:
+        - name: Check if API certificate already exists
+          k8s_info:
+            api_version: cert-manager.io/v1
+            kind: Certificate
+            name: api-cert
+            namespace: openshift-config
+          register: existing_api_cert
+
+        - name: Check API server certificate configuration
+          k8s_info:
+            api_version: config.openshift.io/v1
+            kind: APIServer
+            name: cluster
+          register: current_api_server
+
+        - name: Display API certificate status
+          debug:
+            msg: |
+              API certificate status:
+              - Certificate exists: {{ 'Yes' if existing_api_cert.resources | length > 0 else 'No' }}
+              - Certificate ready: {{ existing_api_cert.resources[0].status.conditions[0].status if existing_api_cert.resources | length > 0 else 'N/A' }}
+              - APIServer configured: {{ 'Yes' if (current_api_server.resources[0].spec.servingCerts.namedCertificates | default([]) | selectattr('servingCertificate.name', 'equalto', 'custom-certs-managed-api') | list | length > 0) else 'No' }}
+              - Configuration needed: {{ 'No' if (existing_api_cert.resources | length > 0 and current_api_server.resources[0].spec.servingCerts.namedCertificates | default([]) | selectattr('servingCertificate.name', 'equalto', 'custom-certs-managed-api') | list | length > 0) else 'Yes' }}
+
+        - name: Create API certificate
+          k8s:
+            state: present
+            definition: "{{ lookup('template', '../templates/k8s/certificates/api-certificate.yaml') | from_yaml }}"
+          register: api_cert_creation
+          when: existing_api_cert.resources | length == 0
+
+        - name: Wait for API certificate to be ready
+          shell: >
+            oc get certificate api-cert -n openshift-config 
+            -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+          register: api_cert_status
+          retries: "{{ default_retries | default(30) }}"
+          delay: "{{ default_delay | default(10) }}"
+          until: api_cert_status.stdout == "True"
+          when: api_cert_creation is changed
+
+        - name: Verify API certificate exists in openshift-config namespace
+          kubernetes.core.k8s_info:
+            api_version: cert-manager.io/v1
+            kind: Certificate
+            name: api-cert
+            namespace: openshift-config
+          register: api_cert_verify
+          failed_when: api_cert_verify.resources | length == 0
+
+        - name: Display API certificate verification
+          debug:
+            msg: |
+              API certificate verification:
+              - Name: {{ api_cert_verify.resources[0].metadata.name }}
+              - Namespace: {{ api_cert_verify.resources[0].metadata.namespace }}
+              - Ready: {{ api_cert_verify.resources[0].status.conditions[0].status if api_cert_verify.resources[0].status.conditions is defined else 'Unknown' }}
+              - Secret Name: {{ api_cert_verify.resources[0].spec.secretName }}
+
+        - name: Patch API server with custom certificate
+          shell: >
+            oc patch apiserver.config.openshift.io cluster --type=merge 
+            -p '{"spec":{"servingCerts":{"namedCertificates":[{"names":["{{ api_hostname }}"],"servingCertificate":{"name":"custom-certs-managed-api"}}]}}}'
+          register: api_patch
+          when: current_api_server.resources[0].spec.servingCerts.namedCertificates | default([]) | selectattr('servingCertificate.name', 'equalto', 'custom-certs-managed-api') | list | length == 0
+
+        - name: Wait for openshift-apiserver operator to stabilize after certificate change
+          kubernetes.core.k8s_info:
+            api_version: config.openshift.io/v1
+            kind: ClusterOperator
+            name: openshift-apiserver
+          register: openshift_apiserver_co_status
+          until:
+            - openshift_apiserver_co_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length > 0
+            - openshift_apiserver_co_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'False') | list | length > 0
+            - openshift_apiserver_co_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Progressing') | selectattr('status', 'equalto', 'False') | list | length > 0
+          retries: 60
+          delay: 10
+          when: api_patch is changed
+
+    - name: Verify cluster operators and certificates
+      block:
+        - name: Verify all certificates exist
+          kubernetes.core.k8s_info:
+            api_version: cert-manager.io/v1
+            kind: Certificate
+            namespace: "{{ item.namespace }}"
+            name: "{{ item.name }}"
+          register: cert_check
+          failed_when: cert_check.resources | length == 0
+          loop:
+            - { namespace: 'openshift-config', name: 'api-cert' }
+            - { namespace: 'openshift-ingress', name: 'ingress-cert' }
+          loop_control:
+            label: "{{ item.namespace }}/{{ item.name }}"
+
+        - name: Display all certificates status
+          debug:
+            msg: |
+              Certificate {{ item.item.namespace }}/{{ item.item.name }}:
+              - Ready: {{ item.resources[0].status.conditions[0].status if item.resources[0].status.conditions is defined else 'Unknown' }}
+              - Secret: {{ item.resources[0].spec.secretName }}
+              - Not After: {{ item.resources[0].status.notAfter if item.resources[0].status.notAfter is defined else 'N/A' }}
+          loop: "{{ cert_check.results }}"
+          loop_control:
+            label: "{{ item.item.namespace }}/{{ item.item.name }}"
+
+        - name: Wait for kube-apiserver operator to be available
+          kubernetes.core.k8s_info:
+            api_version: config.openshift.io/v1
+            kind: ClusterOperator
+            name: kube-apiserver
+          register: kube_apiserver_co
+          until:
+            - kube_apiserver_co.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length > 0
+            - kube_apiserver_co.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'False') | list | length > 0
+            - kube_apiserver_co.resources[0].status.conditions | selectattr('type', 'equalto', 'Progressing') | selectattr('status', 'equalto', 'False') | list | length > 0
+          retries: 60
+          delay: 10
+
+        - name: Wait for openshift-apiserver operator to be available
+          kubernetes.core.k8s_info:
+            api_version: config.openshift.io/v1
+            kind: ClusterOperator
+            name: openshift-apiserver
+          register: openshift_apiserver_co
+          until:
+            - openshift_apiserver_co.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length > 0
+            - openshift_apiserver_co.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'False') | list | length > 0
+            - openshift_apiserver_co.resources[0].status.conditions | selectattr('type', 'equalto', 'Progressing') | selectattr('status', 'equalto', 'False') | list | length > 0
+          retries: 60
+          delay: 10
+
+        - name: Wait for ingress operator to be available
+          kubernetes.core.k8s_info:
+            api_version: config.openshift.io/v1
+            kind: ClusterOperator
+            name: ingress
+          register: ingress_co
+          until:
+            - ingress_co.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length > 0
+            - ingress_co.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'False') | list | length > 0
+            - ingress_co.resources[0].status.conditions | selectattr('type', 'equalto', 'Progressing') | selectattr('status', 'equalto', 'False') | list | length > 0
+          retries: 60
+          delay: 10
+
+        - name: Get cluster operators status
+          shell: oc get clusteroperators kube-apiserver openshift-apiserver ingress
+          register: operators_status
+          changed_when: false
+
+        - name: Display cluster operators status
+          debug:
+            msg: "{{ operators_status.stdout_lines }}"
+
+        - name: Test API server connectivity
+          shell: curl -vk https://{{ api_hostname }}:6443
+          register: api_connectivity_test
+          failed_when: false
+          changed_when: false
+
+        - name: Get API certificate details
+          shell: >
+            echo | openssl s_client -connect {{ api_hostname }}:6443 
+            -servername {{ api_hostname }} 2>/dev/null | 
+            openssl x509 -noout -subject -issuer -dates -fingerprint
+          register: api_cert_details
+          failed_when: false
+          changed_when: false
+
+        - name: Display API certificate details
+          debug:
+            msg: "{{ api_cert_details.stdout_lines }}"
+          when: api_cert_details.rc == 0
+
+  post_tasks:
+    - name: Clean up temporary CA files from /tmp
+      file:
+        path: "{{ temp_ca_dir.path }}"
+        state: absent
+      when: temp_ca_dir is defined and temp_ca_dir.path is defined
+      check_mode: no
+      tags: always

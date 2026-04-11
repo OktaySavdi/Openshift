@@ -1,0 +1,142 @@
+---
+- name: Configure LDAP group synchronization
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+    - ../vars/vault.yml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    override_ldap_config: "{{ enable_ldap | default(true) }}"
+
+  pre_tasks:
+    - name: Verify LDAP sync prerequisites
+      assert:
+        that:
+          - ldap_password is defined
+          - ldap_password != ""
+        fail_msg: "LDAP password must be defined for group sync"
+
+    - name: Test cluster connectivity
+      shell: oc whoami
+      register: cluster_test
+      changed_when: false
+
+  tasks:
+    - name: Check if LDAP group sync ConfigMap already exists
+      k8s_info:
+        api_version: v1
+        kind: ConfigMap
+        name: ldap-group-sync-config
+        namespace: openshift-config
+      register: existing_sync_config
+      when: override_ldap_config | bool
+
+    - name: Display LDAP sync config status
+      debug:
+        msg: |
+          LDAP group sync configuration status:
+          - ConfigMap exists: {{ 'Yes' if existing_sync_config.resources | length > 0 else 'No' }}
+          - Update needed: {{ 'No' if existing_sync_config.resources | length > 0 else 'Yes' }}
+      when: override_ldap_config | bool
+
+    - name: Create LDAP group sync configuration
+      when: override_ldap_config | bool
+      k8s:
+        definition: "{{ lookup('template', '../templates/k8s/ldap/ldap-sync-config.yaml') | from_yaml }}"
+        state: present
+
+    - name: Create LDAP group whitelist (if applicable)
+      when: 
+        - override_ldap_config | bool
+        - ldap_group_whitelist is defined
+      k8s:
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: ldap-group-whitelist
+            namespace: openshift-config
+          data:
+            whitelist.txt: "{{ ldap_group_whitelist | join('\n') }}"
+        state: present
+
+    - name: Run LDAP group sync dry-run
+      when: override_ldap_config | bool
+      shell: >
+        oc adm groups sync 
+        --sync-config=/tmp/ldap-sync-config.yaml 
+        --dry-run
+      register: sync_dry_run
+      failed_when: false
+
+    - name: Display dry-run results
+      debug:
+        msg: "LDAP sync dry-run found {{ sync_dry_run.stdout_lines | length }} groups"
+      when: sync_dry_run is succeeded
+
+    - name: Perform LDAP group synchronization
+      when: 
+        - override_ldap_config | bool
+        - sync_dry_run.rc == 0
+      shell: >
+        oc adm groups sync 
+        --sync-config=/tmp/ldap-sync-config.yaml 
+        --confirm
+      register: sync_result
+
+    - name: Display synchronization results
+      debug:
+        msg: "LDAP group sync completed successfully"
+      when: sync_result is succeeded
+
+    - name: Create CronJob for periodic group sync
+      when: sync_result is succeeded
+      k8s:
+        definition:
+          apiVersion: batch/v1
+          kind: CronJob
+          metadata:
+            name: ldap-group-sync
+            namespace: openshift-config
+          spec:
+            schedule: "{{ ldap_sync_schedule | default('0 */6 * * *') }}"
+            jobTemplate:
+              spec:
+                template:
+                  spec:
+                    serviceAccountName: ldap-group-sync
+                    containers:
+                    - name: ldap-group-sync
+                      image: registry.redhat.io/openshift4/ose-cli:latest
+                      command:
+                      - /bin/bash
+                      - -c
+                      - |
+                        oc adm groups sync \
+                          --sync-config=/tmp/ldap-sync-config.yaml \
+                          --confirm
+                      volumeMounts:
+                      - name: ldap-sync-config
+                        mountPath: /tmp
+                        readOnly: true
+                    volumes:
+                    - name: ldap-sync-config
+                      configMap:
+                        name: ldap-sync-config
+                    restartPolicy: Never
+            successfulJobsHistoryLimit: 5
+            failedJobsHistoryLimit: 5
+        state: present
+
+    - name: Verify synchronized groups
+      shell: oc get groups -o name | wc -l
+      register: final_groups
+      changed_when: false
+      when: sync_result is succeeded
+
+    - name: Display final group count
+      debug:
+        msg: "Total groups after sync: {{ final_groups.stdout }}"
+      when: final_groups is succeeded

@@ -1,0 +1,180 @@
+---
+- name: Configure egress IP for cluster using OVN-Kubernetes
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+  pre_tasks:
+    - name: Verify egress configuration variables
+      assert:
+        that:
+          - egress_ips is defined
+          - egress_ips | length > 0
+          - egress_namespace_selector is defined
+        fail_msg: "Egress IPs and namespace selector must be defined in all_vars.yaml"
+
+    - name: Test cluster connectivity
+      shell: oc whoami
+      register: cluster_test
+      changed_when: false
+
+  tasks:
+    - name: Configure OVN-Kubernetes egress IP
+      block:
+        - name: Get worker nodes for egress IP assignment
+          shell: >
+            oc get nodes -l node-role.kubernetes.io/worker= 
+            -o=jsonpath="{.items[*]['metadata.name']}"
+          register: worker_nodes
+          changed_when: false
+
+        - name: Display available worker nodes
+          debug:
+            msg: "Available worker nodes: {{ worker_nodes.stdout.split() | join(', ') if worker_nodes.stdout else 'None found' }}"
+
+        - name: Verify worker nodes exist
+          assert:
+            that: worker_nodes.stdout != ""
+            fail_msg: "No worker nodes found in the cluster"
+
+        - name: Get nodes already labeled for egress assignment
+          shell: >
+            oc get nodes -l k8s.ovn.org/egress-assignable= 
+            -o jsonpath='{.items[*].metadata.name}'
+          register: nodes_with_egress_label
+          changed_when: false
+          failed_when: false
+
+        - name: Identify nodes that need egress labels
+          set_fact:
+            already_labeled_nodes: "{{ nodes_with_egress_label.stdout.split() if nodes_with_egress_label.stdout else [] }}"
+            nodes_needing_labels: "{{ worker_nodes.stdout.split() | difference(nodes_with_egress_label.stdout.split() if nodes_with_egress_label.stdout else []) }}"
+
+        - name: Display egress labeling status
+          debug:
+            msg: |
+              Egress IP node labeling status:
+              - Total worker nodes: {{ worker_nodes.stdout.split() | length }}
+              - Already labeled: {{ already_labeled_nodes | length }} ({{ already_labeled_nodes | join(', ') if already_labeled_nodes else 'None' }})
+              - Need labeling: {{ nodes_needing_labels | length }} ({{ nodes_needing_labels | join(', ') if nodes_needing_labels else 'None' }})
+
+        - name: Label all worker nodes for egress IP assignment
+          shell: >
+            oc label node {{ item }} k8s.ovn.org/egress-assignable="" --overwrite
+          loop: "{{ nodes_needing_labels }}"
+          when: nodes_needing_labels | length > 0
+          register: node_labeling_result
+
+        - name: Verify egress assignable nodes
+          shell: >
+            oc get nodes -l k8s.ovn.org/egress-assignable= 
+            -o=jsonpath="{.items[*]['metadata.name']}"
+          register: egress_assignable_nodes
+          changed_when: false
+
+        - name: Display egress assignable nodes
+          debug:
+            msg: "Egress assignable nodes: {{ egress_assignable_nodes.stdout.split() | join(', ') }}"
+
+        - name: Check if EgressIP object already exists
+          shell: oc get egressip {{ egress_name | default('cluster-egress') }} -o name
+          register: existing_egressip
+          failed_when: false
+          changed_when: false
+
+        - name: Get existing EgressIP configuration if exists
+          k8s_info:
+            api_version: k8s.ovn.org/v1
+            kind: EgressIP
+            name: "{{ egress_name | default('cluster-egress') }}"
+          register: existing_egressip_config
+          when: existing_egressip.rc == 0
+
+        - name: Compare existing EgressIP configuration
+          set_fact:
+            egressip_matches: >-
+              {{
+                (existing_egressip_config.resources | length > 0) and
+                (existing_egressip_config.resources[0].spec.egressIPs | sort == egress_ips | sort) and
+                (existing_egressip_config.resources[0].spec.namespaceSelector == egress_namespace_selector)
+              }}
+          when: existing_egressip.rc == 0
+
+        - name: Display existing EgressIP status
+          debug:
+            msg: |
+              EgressIP object {{ egress_name | default('cluster-egress') }}: {{ 'exists' if existing_egressip.rc == 0 else 'not found' }}
+              {% if existing_egressip.rc == 0 %}
+              Current IPs: {{ existing_egressip_config.resources[0].spec.egressIPs | join(', ') }}
+              Desired IPs: {{ egress_ips | join(', ') }}
+              Configuration matches: {{ 'Yes' if egressip_matches | default(false) else 'No' }}
+              Update needed: {{ 'No' if egressip_matches | default(false) else 'Yes' }}
+              {% else %}
+              Update needed: Yes (new creation)
+              {% endif %}
+
+        - name: Create or update EgressIP object
+          k8s:
+            definition:
+              apiVersion: k8s.ovn.org/v1
+              kind: EgressIP
+              metadata:
+                name: "{{ egress_name | default('cluster-egress') }}"
+              spec:
+                egressIPs: "{{ egress_ips }}"
+                namespaceSelector: "{{ egress_namespace_selector }}"
+                podSelector: "{{ egress_pod_selector | default(omit) }}"
+          register: egressip_creation
+          when: (existing_egressip.rc != 0) or (not egressip_matches | default(false))
+
+        - name: Wait for EgressIP assignment
+          shell: >
+            oc get egressip {{ egress_name | default('cluster-egress') }} 
+            -o jsonpath='{.status.items[*].node}'
+          register: egressip_assignment
+          retries: "{{ default_retries | default(30) }}"
+          delay: "{{ default_delay | default(10) }}"
+          until: egressip_assignment.stdout != ""
+          when: egressip_creation is succeeded
+
+        - name: Verify EgressIP status
+          shell: >
+            oc get egressip {{ egress_name | default('cluster-egress') }} -o yaml
+          register: egressip_status
+          when: egressip_creation is succeeded
+
+        - name: Parse EgressIP assignment details
+          set_fact:
+            egressip_status_yaml: "{{ egressip_status.stdout | from_yaml }}"
+            egressip_assignments: "{{ (egressip_status.stdout | from_yaml).status['items'] | default([]) }}"
+          when: egressip_status is succeeded
+
+        - name: Display EgressIP assignments
+          debug:
+            msg: "EgressIP {{ item.egressIP }} assigned to node {{ item.node }}"
+          loop: "{{ egressip_assignments }}"
+          when: 
+            - egressip_assignments is defined
+            - egressip_assignments | length > 0
+
+      rescue:
+        - name: Display error message
+          debug:
+            msg: "Egress IP configuration failed: {{ ansible_failed_result.msg | default('Unknown error') }}"
+
+        - name: Cleanup partial EgressIP configuration
+          shell: oc delete egressip {{ egress_name | default('cluster-egress') }} --ignore-not-found=true
+          failed_when: false
+          changed_when: false
+
+        - name: Fail the playbook
+          fail:
+            msg: "Egress IP configuration failed. Partial configuration has been cleaned up."
+
+      always:
+        - name: Display final egress IP configuration status
+          debug:
+            msg: "Egress IP configuration {{ 'completed successfully' if ansible_failed_task is not defined else 'failed' }}"

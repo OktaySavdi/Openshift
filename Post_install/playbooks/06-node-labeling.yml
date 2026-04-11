@@ -1,0 +1,70 @@
+---
+- name: Label existing baremetal nodes for OpenShift roles
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  
+  pre_tasks:
+    - name: Test cluster connectivity
+      command: oc whoami
+      register: cluster_test
+      changed_when: false
+  
+  tasks:
+    - name: Verify node labeling configuration is defined
+      assert:
+        that:
+          - node_labeling_config is defined
+          - node_labeling_config | length > 0
+        fail_msg: "Node labeling configuration must be defined in vars file"
+
+    - name: Get existing nodes
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+      register: existing_nodes
+
+    - name: Display existing nodes
+      debug:
+        msg: "Found {{ existing_nodes.resources | length }} nodes in cluster"
+
+    - name: Label nodes based on configuration
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: "{{ node.metadata.name }}"
+            labels: "{{ node.metadata.labels | combine(item.labels | items2dict) }}"
+      loop: "{{ node_labeling_config }}"
+      when: 
+        - existing_nodes.resources | length > 0
+        - node.metadata.labels[item.node_selector.split('=')[0]] is defined
+      loop_control:
+        loop_var: item
+      vars:
+        node: "{{ existing_nodes.resources | selectattr('metadata.labels.' + item.node_selector.split('=')[0], 'defined') | first }}"
+      tags:
+        - labeling
+        - nodes
+
+    - name: Verify node labels
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+      register: labeled_nodes
+
+    - name: Display node labeling summary
+      debug:
+        msg:
+          - "Node labeling completed for baremetal cluster"
+          - "Total nodes: {{ labeled_nodes.resources | length }}"
+          - "Node types configured: {{ node_labeling_config | map(attribute='node_selector') | list }}"
+      tags:
+        - labeling
+        - summary

@@ -1,0 +1,89 @@
+---
+- name: Disable self-provisioning
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars/all_vars.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    disable_self_provisioning_enabled: "{{ disable_self_provisioning | default(true) }}"
+
+  tasks:
+    - name: Disable project self-provisioning
+      when: disable_self_provisioning_enabled | bool
+      block:
+        - name: Check current self-provisioners configuration
+          shell: oc get clusterrolebinding self-provisioners -o jsonpath='{.subjects}'
+          register: current_self_provisioners
+          changed_when: false
+          failed_when: false
+          check_mode: no
+          tags: [check, security]
+
+        - name: Check autoupdate annotation
+          shell: oc get clusterrolebinding self-provisioners -o jsonpath='{.metadata.annotations.rbac\.authorization\.kubernetes\.io/autoupdate}'
+          register: current_autoupdate
+          changed_when: false
+          failed_when: false
+          check_mode: no
+          tags: [check, security]
+
+        - name: Display current self-provisioning status
+          debug:
+            msg: |
+              Self-provisioning status:
+              - Subjects: {{ current_self_provisioners.stdout }}
+              - Autoupdate: {{ current_autoupdate.stdout }}
+              - Already disabled: {{ 'Yes' if (current_self_provisioners.stdout == 'null' and current_autoupdate.stdout == 'false') else 'No' }}
+              - Configuration needed: {{ 'No' if (current_self_provisioners.stdout == 'null' and current_autoupdate.stdout == 'false') else 'Yes' }}
+          tags: [check, security]
+
+        - name: Remove subjects from self-provisioners clusterrolebinding
+          shell: |
+            oc patch clusterrolebinding self-provisioners -p '{"subjects": null}'
+          register: patch_subjects
+          when: 
+            - current_self_provisioners.stdout != "null" 
+            - current_self_provisioners.rc == 0
+          check_mode: no
+          tags: [configure, security]
+
+        - name: Disable automatic updates to self-provisioners
+          shell: |
+            oc patch clusterrolebinding self-provisioners -p '{"metadata":{"annotations":{"rbac.authorization.kubernetes.io/autoupdate":"false"}}}'
+          register: patch_autoupdate
+          when: current_autoupdate.stdout != "false"
+          check_mode: no
+          tags: [configure, security]
+
+        - name: Set custom project request message
+          k8s:
+            api_version: config.openshift.io/v1
+            kind: Project
+            name: cluster
+            definition:
+              apiVersion: config.openshift.io/v1
+              kind: Project
+              metadata:
+                name: cluster
+              spec:
+                projectRequestMessage: "Project creation is restricted. Please contact your cluster administrator to request a new project."
+            state: present
+          check_mode: no
+          tags: [configure, security]
+
+        - name: Verify self-provisioning is disabled
+          shell: oc auth can-i create project --as=system:serviceaccount:default:default
+          register: provision_test
+          failed_when: false
+          changed_when: false
+          check_mode: no
+          tags: [verify, security]
+
+        - name: Display verification result
+          debug:
+            msg: |
+              Self-provisioning status: {{ 'Disabled' if provision_test.rc != 0 else 'Still Enabled - Check Configuration' }}
+              Test result: {{ provision_test.stdout }}
+          tags: [verify, security]
