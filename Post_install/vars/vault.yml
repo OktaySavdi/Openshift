@@ -1,0 +1,45 @@
+# Example usage in playbook:
+#   vars_files:
+#     - ../vars/all_vars.yaml
+#     - ../vars/vault.yml
+#
+# Then run with: ansible-playbook playbook.yml --ask-vault-pass
+# Or: ansible-playbook playbook.yml --vault-password-file ~/.vault_pass
+
+---
+# LDAP Credentials
+vault_ldap_password: "xxxxxx"
+
+# CA Certificate Private Key
+vault_ca_key: |
+  -----BEGIN PRIVATE KEY-----
+  xxxxxxx
+  -----END PRIVATE KEY-----
+
+# CA Certificate
+vault_ca_cert: |
+  -----BEGIN CERTIFICATE-----
+  xxxxxxx
+  -----END CERTIFICATE-----
+
+# Microsoft Teams Webhook
+vault_teams_webhook_url: "https://xxxxxxxxxx
+
+# ServiceNow Credentials
+vault_servicenow_instance: "xxxxxxx"
+vault_servicenow_user: "xxxxxxx"
+vault_servicenow_password: "xxxxxxx"
+
+# SSH Public Key for node access
+vault_ssh_public_key: "xxxxxxx"
+
+# Docker Private Registery info
+vault_docker_username: "xxxxx"
+vault_docker_password: "xxxxx"
+
+
+# Azure Cost Management API for Kubecost
+vault_azure_subscription_id: "xxxxx"
+vault_azure_tenant_id: "xxxxx"
+vault_azure_client_id: "xxxxx"
+vault_azure_client_secret: "xxxxx"

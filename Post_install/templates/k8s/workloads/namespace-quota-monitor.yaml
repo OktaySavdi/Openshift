@@ -1,0 +1,524 @@
+---
+# ServiceAccount for namespace quota monitoring
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: namespace-quota-monitor-sa
+  namespace: gt-operators
+
+---
+# ClusterRole with permissions to read quotas and pods
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: namespace-quota-monitor-role
+rules:
+  # Permission to read namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list", "get"]
+  # Permission to read resource quotas
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["list", "get"]
+  # Permission to read pods (to identify resource consumers)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+  # Permission to read pod metrics
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: namespace-quota-monitor-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: namespace-quota-monitor-role
+subjects:
+  - kind: ServiceAccount
+    name: namespace-quota-monitor-sa
+    namespace: gt-operators
+
+---
+# ConfigMap for quota monitor configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: namespace-quota-monitor-config
+  namespace: gt-operators
+data:
+  # Cluster Configuration
+  CLUSTER_NAME: "gtocpmyntpoc01"
+  
+  # Alert Thresholds
+  CRITICAL_THRESHOLD: "95"
+  WARNING_THRESHOLD: "90"
+  
+  # ServiceNow Configuration
+  SERVICENOW_ASSIGNMENT_GROUP: "{{ servicenow_assignment_group }}"
+  SERVICENOW_CATEGORY: "Kubernetes"
+  SERVICENOW_SUBCATEGORY: "Resource Quota"
+  SERVICENOW_CALLER_ID: "quota-monitor-operator"
+  SERVICENOW_CONTACT_TYPE: "Monitoring"
+  
+  # Feature Flags
+  ENABLE_SERVICENOW: "true"
+  ENABLE_TEAMS_ALERTS: "true"
+
+---
+# Secret for Teams webhook URL and ServiceNow credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: quota-teams-webhook
+  namespace: gt-operators
+type: Opaque
+stringData:
+  # Teams webhook URL
+  TEAMS_WEBHOOK_URL: "{{ vault_teams_webhook_url }}"
+  
+  # ServiceNow credentials
+  SERVICENOW_INSTANCE: "{{ servicenow_instance }}"
+  SERVICENOW_USER: "{{ servicenow_user }}"
+  SERVICENOW_PASS: "{{ servicenow_password }}"
+
+---
+# ConfigMap containing the monitoring script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: namespace-quota-monitor-script
+  namespace: gt-operators
+data:
+  monitor.sh: |
+    #!/bin/bash
+    # ============================================================
+    # Namespace Resource Quota Monitor
+    # Purpose: Monitor namespace quotas and alert on approaching limits
+    # ============================================================
+    
+    set -e
+    
+    echo "=========================================="
+    echo "Namespace Quota Monitor Starting"
+    echo "Time: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "=========================================="
+    
+    # Configuration from ConfigMap/Secret
+    CLUSTER_NAME="${CLUSTER_NAME:-kubernetes-cluster}"
+    CRITICAL_THRESHOLD="${CRITICAL_THRESHOLD:-95}"
+    WARNING_THRESHOLD="${WARNING_THRESHOLD:-90}"
+    
+    echo "Cluster: $CLUSTER_NAME"
+    echo "Thresholds: WARNING=${WARNING_THRESHOLD}% CRITICAL=${CRITICAL_THRESHOLD}%"
+    echo ""
+    
+    # Check Teams webhook
+    WEBHOOK_URL="${TEAMS_WEBHOOK_URL}"
+    if [ -z "$WEBHOOK_URL" ] || [ "$WEBHOOK_URL" == "https://your-teams-webhook-url-here" ]; then
+      echo "⚠️  WARNING: Teams webhook not configured. Skipping notifications."
+      SEND_TEAMS=false
+    else
+      SEND_TEAMS=true
+    fi
+    
+    # Temp files
+    QUOTA_REPORT="/tmp/quota_report_$$.txt"
+    ALERT_REPORT="/tmp/alert_report_$$.txt"
+    > "$QUOTA_REPORT"
+    > "$ALERT_REPORT"
+    
+    # ===== SERVICENOW INTEGRATION =====
+    servicenow_api() {
+      [ "$ENABLE_SERVICENOW" != "true" ] && return 1
+      [ -z "$SERVICENOW_INSTANCE" ] || [ "$SERVICENOW_INSTANCE" == "your-instance.service-now.com" ] && return 1
+      
+      local action="$1"
+      local desc=$(printf '%s' "$2" | sed 's/"/\\"/g' | tr '\n' ' ')
+      
+      if [ "$action" == "create" ]; then
+        local payload="{\"short_description\":\"CRITICAL: Namespace Quota Alert - ${CLUSTER_NAME}\",\"description\":\"${desc}\\n\\nCluster: ${CLUSTER_NAME}\\nTime: $(date)\",\"urgency\":\"1\",\"impact\":\"1\",\"priority\":\"1\",\"assignment_group\":\"$SERVICENOW_ASSIGNMENT_GROUP\",\"category\":\"$SERVICENOW_CATEGORY\",\"subcategory\":\"$SERVICENOW_SUBCATEGORY\",\"u_cluster_name\":\"$CLUSTER_NAME\",\"state\":\"1\"}"
+        local resp=$(curl -s -w "\n%{http_code}" -u "$SERVICENOW_USER:$SERVICENOW_PASS" -H "Content-Type: application/json" -d "$payload" "https://$SERVICENOW_INSTANCE/api/now/table/incident" 2>&1)
+        local code=$(echo "$resp" | tail -n1)
+        [ "$code" == "201" ] && echo "$resp" | head -n -1 | grep -o '"number":"[^"]*' | cut -d'"' -f4 && return 0
+        
+      elif [ "$action" == "check" ]; then
+        local ts=$(date -u -d "24 hours ago" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -v-24H '+%Y-%m-%d %H:%M:%S')
+        local resp=$(curl -s -w "\n%{http_code}" -u "$SERVICENOW_USER:$SERVICENOW_PASS" "https://$SERVICENOW_INSTANCE/api/now/table/incident?sysparm_query=u_cluster_name=${CLUSTER_NAME}^stateIN1,2,3^sys_created_on>=${ts}&sysparm_limit=1" 2>&1)
+        local code=$(echo "$resp" | tail -n1)
+        [ "$code" == "200" ] && echo "$resp" | head -n -1 | grep -o '"number":"[^"]*' | head -1 | cut -d'"' -f4 && return 0
+        
+      elif [ "$action" == "update" ]; then
+        local sys_id="$3"
+        local payload="{\"work_notes\":\"${desc}\"}"
+        curl -s -u "$SERVICENOW_USER:$SERVICENOW_PASS" -H "Content-Type: application/json" -X PATCH -d "$payload" "https://$SERVICENOW_INSTANCE/api/now/table/incident/$sys_id" >/dev/null && return 0
+      fi
+      return 1
+    }
+    
+    # Function to send Teams notification
+    send_teams_alert() {
+      local title="$1"
+      local message="$2"
+      local color="$3"
+      
+      if [ "$ENABLE_TEAMS_ALERTS" != "true" ]; then
+        echo "  ℹ️  Teams alerts disabled via configuration"
+        return 0
+      fi
+      
+      if [ "$SEND_TEAMS" != "true" ]; then
+        echo "  ⚠️  Teams notification skipped (webhook not configured)"
+        return
+      fi
+      
+      local payload=$(cat <<EOF
+    {
+      "@type": "MessageCard",
+      "@context": "https://schema.org/extensions",
+      "summary": "$title",
+      "themeColor": "$color",
+      "title": "$title",
+      "sections": [{
+        "activityTitle": "Cluster: $CLUSTER_NAME",
+        "activitySubtitle": "$(date '+%Y-%m-%d %H:%M:%S UTC')",
+        "facts": [
+          {
+            "name": "Cluster:",
+            "value": "$CLUSTER_NAME"
+          }
+        ],
+        "text": "$message",
+        "markdown": true
+      }]
+    }
+    EOF
+    )
+      
+      echo "  📤 Sending Teams notification..."
+      RESPONSE=$(curl -s -w "\n%{http_code}" -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL" 2>&1)
+      HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+      
+      if [ "$HTTP_CODE" == "200" ]; then
+        echo "  ✅ Teams notification sent successfully"
+      else
+        echo "  ❌ Teams notification failed (HTTP $HTTP_CODE)"
+      fi
+    }
+    
+    # Function to convert resource to base unit
+    convert_to_base() {
+      local value="$1"
+      local resource_type="$2"
+      
+      if [ -z "$value" ] || [ "$value" == "0" ]; then
+        echo "0"
+        return
+      fi
+      
+      # Handle CPU (convert to millicores)
+      if [ "$resource_type" == "cpu" ]; then
+        if [[ "$value" =~ m$ ]]; then
+          # Already in millicores
+          echo "${value%m}"
+        else
+          # In cores, convert to millicores
+          echo "$value" | awk '{printf "%.0f", $1 * 1000}'
+        fi
+      
+      # Handle Memory (convert to Mi)
+      elif [ "$resource_type" == "memory" ]; then
+        if [[ "$value" =~ Ki$ ]]; then
+          echo "${value%Ki}" | awk '{printf "%.0f", $1 / 1024}'
+        elif [[ "$value" =~ Mi$ ]]; then
+          echo "${value%Mi}"
+        elif [[ "$value" =~ Gi$ ]]; then
+          echo "${value%Gi}" | awk '{printf "%.0f", $1 * 1024}'
+        elif [[ "$value" =~ Ti$ ]]; then
+          echo "${value%Ti}" | awk '{printf "%.0f", $1 * 1024 * 1024}'
+        else
+          # Assume bytes, convert to Mi
+          echo "$value" | awk '{printf "%.0f", $1 / 1024 / 1024}'
+        fi
+      else
+        echo "$value"
+      fi
+    }
+    
+    # Function to get top resource consumers in a namespace
+    get_top_consumers() {
+      local namespace="$1"
+      local resource_type="$2"
+      
+      if [ "$resource_type" == "cpu" ]; then
+        kubectl top pods -n "$namespace" 2>/dev/null | \
+          grep -v "NAME" | sort -k2 -h -r | head -3 | \
+          awk '{printf "  - %s: %s\\n", $1, $2}' || echo "  - Unable to get pod metrics"
+      elif [ "$resource_type" == "memory" ]; then
+        kubectl top pods -n "$namespace" 2>/dev/null | \
+          grep -v "NAME" | sort -k3 -h -r | head -3 | \
+          awk '{printf "  - %s: %s\\n", $1, $3}' || echo "  - Unable to get pod metrics"
+      fi
+    }
+    
+    # Function to monitor quota for a specific resource
+    check_quota_resource() {
+      local namespace="$1"
+      local quota_name="$2"
+      local resource_name="$3"
+      local hard_limit="$4"
+      local used_value="$5"
+      
+      # Skip if no hard limit
+      if [ -z "$hard_limit" ] || [ "$hard_limit" == "<none>" ]; then
+        return
+      fi
+      
+      # Determine resource type (cpu, memory, or count)
+      local resource_type=""
+      if [[ "$resource_name" =~ cpu ]]; then
+        resource_type="cpu"
+      elif [[ "$resource_name" =~ memory ]]; then
+        resource_type="memory"
+      else
+        resource_type="count"
+      fi
+      
+      # Convert to base units for comparison
+      local hard_base=$(convert_to_base "$hard_limit" "$resource_type")
+      local used_base=$(convert_to_base "$used_value" "$resource_type")
+      
+      # Skip if conversion failed
+      if [ "$hard_base" == "0" ]; then
+        return
+      fi
+      
+      # Calculate percentage
+      local percent=$(echo "$used_base $hard_base" | awk '{printf "%.0f", ($1 / $2) * 100}')
+      
+      # Determine unit for display
+      local unit=""
+      if [ "$resource_type" == "cpu" ]; then
+        unit="m"
+      elif [ "$resource_type" == "memory" ]; then
+        unit="Mi"
+      fi
+      
+      echo "  ${resource_name}: ${used_base}${unit} / ${hard_base}${unit} (${percent}%)"
+      
+      # Log to report
+      echo "Namespace: $namespace" >> "$QUOTA_REPORT"
+      echo "  Quota: $quota_name" >> "$QUOTA_REPORT"
+      echo "  Resource: $resource_name" >> "$QUOTA_REPORT"
+      echo "  Used: ${used_base}${unit} / ${hard_base}${unit} (${percent}%)" >> "$QUOTA_REPORT"
+      echo "" >> "$QUOTA_REPORT"
+      
+      # Check thresholds and alert
+      if [ "$percent" -ge "$CRITICAL_THRESHOLD" ]; then
+        echo "  🔴 CRITICAL: ${resource_name} at ${percent}%"
+        
+        # Get top consumers for CPU/Memory
+        local top_consumers=""
+        if [ "$resource_type" == "cpu" ] || [ "$resource_type" == "memory" ]; then
+          top_consumers=$(get_top_consumers "$namespace" "$resource_type")
+        fi
+        
+        local alert_msg="🚨 **CRITICAL: Namespace Quota Almost Exhausted**  \\n\\n**Namespace:** \`$namespace\`  \\n**Quota:** \`$quota_name\`  \\n**Resource:** $resource_name  \\n**Used:** ${used_base}${unit} / ${hard_base}${unit} (${percent}%)  \\n\\n**Top Consumers:**  \\n$top_consumers  \\n\\n⚠️ **Action Required:** Increase quota or reduce resource usage immediately!"
+        
+        # Check for existing ServiceNow ticket
+        local ticket=$(servicenow_api "check")
+        
+        if [ -n "$ticket" ]; then
+          echo "  ℹ️  Updating existing ServiceNow ticket: $ticket"
+          local sys_id=$(curl -s -u "$SERVICENOW_USER:$SERVICENOW_PASS" "https://$SERVICENOW_INSTANCE/api/now/table/incident?sysparm_query=number=${ticket}&sysparm_limit=1" 2>/dev/null | grep -o '"sys_id":"[^"]*' | head -1 | cut -d'"' -f4)
+          servicenow_api "update" "QUOTA ALERT: Namespace: $namespace, Quota: $quota_name, Resource: $resource_name at ${percent}% (${used_base}${unit} / ${hard_base}${unit}). Top consumers: $top_consumers" "$sys_id"
+          send_teams_alert "🔴 CRITICAL: Namespace Quota at ${percent}%" "$alert_msg\\n\\n📋 Ticket: ${ticket} (updated)" "FF0000"
+        else
+          echo "  ℹ️  Creating new ServiceNow ticket"
+          ticket=$(servicenow_api "create" "Namespace quota critical: $namespace/$quota_name - $resource_name at ${percent}% (${used_base}${unit} / ${hard_base}${unit}). Top consumers: $top_consumers")
+          [ -n "$ticket" ] && send_teams_alert "🔴 CRITICAL: Namespace Quota at ${percent}%" "$alert_msg\\n\\n📋 Ticket: ${ticket}" "FF0000" || send_teams_alert "🔴 CRITICAL: Namespace Quota at ${percent}%" "$alert_msg" "FF0000"
+        fi
+        
+        echo "$namespace|$quota_name|$resource_name|${percent}%" >> "$ALERT_REPORT"
+        
+      elif [ "$percent" -ge "$WARNING_THRESHOLD" ]; then
+        echo "  🟠 WARNING: ${resource_name} at ${percent}%"
+        
+        # Get top consumers for CPU/Memory
+        local top_consumers=""
+        if [ "$resource_type" == "cpu" ] || [ "$resource_type" == "memory" ]; then
+          top_consumers=$(get_top_consumers "$namespace" "$resource_type")
+        fi
+        
+        local alert_msg="⚠️ **WARNING: Namespace Quota High**  \\n\\n**Namespace:** \`$namespace\`  \\n**Quota:** \`$quota_name\`  \\n**Resource:** $resource_name  \\n**Used:** ${used_base}${unit} / ${hard_base}${unit} (${percent}%)  \\n\\n**Top Consumers:**  \\n$top_consumers  \\n\\n⚠️ **Action Recommended:** Plan to increase quota or optimize resource usage."
+        send_teams_alert "🟠 WARNING: Namespace Quota at ${percent}%" "$alert_msg" "FFA500"
+        
+        echo "$namespace|$quota_name|$resource_name|${percent}%" >> "$ALERT_REPORT"
+      else
+        echo "  ✅ ${resource_name} OK (${percent}%)"
+      fi
+    }
+    
+    # Function to monitor a single ResourceQuota
+    monitor_quota() {
+      local namespace="$1"
+      local quota_name="$2"
+      
+      echo "=== Checking ResourceQuota: $quota_name in namespace: $namespace ==="
+      
+      # Get quota details
+      QUOTA_JSON=$(kubectl get resourcequota "$quota_name" -n "$namespace" -o json 2>/dev/null)
+      
+      if [ -z "$QUOTA_JSON" ]; then
+        echo "  ⚠️  Unable to get quota details"
+        echo ""
+        return
+      fi
+      
+      # Parse hard limits and used values
+      HARD_LIMITS=$(echo "$QUOTA_JSON" | jq -r '.status.hard // {} | to_entries[] | "\(.key)|\(.value)"' 2>/dev/null)
+      USED_VALUES=$(echo "$QUOTA_JSON" | jq -r '.status.used // {} | to_entries[] | "\(.key)|\(.value)"' 2>/dev/null)
+      
+      if [ -z "$HARD_LIMITS" ]; then
+        echo "  ℹ️  No hard limits configured"
+        echo ""
+        return
+      fi
+      
+      # Check each resource in the quota
+      while IFS='|' read -r resource hard; do
+        # Get corresponding used value
+        used=$(echo "$USED_VALUES" | grep "^${resource}|" | cut -d'|' -f2)
+        used=${used:-0}
+        
+        check_quota_resource "$namespace" "$quota_name" "$resource" "$hard" "$used"
+      done <<< "$HARD_LIMITS"
+      
+      echo ""
+    }
+    
+    echo "=== Scanning Namespaces for ResourceQuotas ==="
+    echo ""
+    
+    # Counter for quotas found
+    QUOTA_COUNT=0
+    
+    # Get all namespaces
+    NAMESPACES=$(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+    
+    if [ -z "$NAMESPACES" ]; then
+      echo "❌ No namespaces found"
+      exit 1
+    fi
+    
+    # Check each namespace for ResourceQuotas
+    for namespace in $NAMESPACES; do
+      # Get all ResourceQuotas in this namespace
+      QUOTAS=$(kubectl get resourcequota -n "$namespace" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+      
+      if [ -n "$QUOTAS" ]; then
+        for quota in $QUOTAS; do
+          monitor_quota "$namespace" "$quota"
+          QUOTA_COUNT=$((QUOTA_COUNT + 1))
+        done
+      fi
+    done
+    
+    echo "=========================================="
+    echo "Namespace Quota Scan Complete"
+    echo "Total ResourceQuotas checked: $QUOTA_COUNT"
+    echo "=========================================="
+    
+    # Display reports
+    if [ -s "$QUOTA_REPORT" ]; then
+      echo ""
+      echo "=== Quota Usage Summary ==="
+      cat "$QUOTA_REPORT"
+    else
+      echo ""
+      echo "ℹ️  No ResourceQuotas found in the cluster"
+      echo "ℹ️  ResourceQuotas help prevent resource exhaustion in namespaces"
+    fi
+    
+    if [ -s "$ALERT_REPORT" ]; then
+      echo ""
+      echo "=== Quotas Requiring Attention ==="
+      while IFS='|' read -r namespace quota resource percent; do
+        echo "⚠️  $namespace / $quota / $resource: $percent"
+      done < "$ALERT_REPORT"
+    fi
+    
+    # Cleanup
+    rm -f "$QUOTA_REPORT" "$ALERT_REPORT"
+    
+    exit 0
+
+---
+# CronJob to run namespace quota monitoring
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: namespace-quota-monitor
+  namespace: gt-operators
+spec:
+  # Run every hour
+  schedule: "0 * * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 3600  # Keep job for 1 hour
+      template:
+        metadata:
+          labels:
+            app: namespace-quota-monitor
+        spec:
+          serviceAccountName: namespace-quota-monitor-sa
+{% if enable_registry_secret | default(false) %}
+          imagePullSecrets:
+            - name: regcred
+{% endif %}
+          restartPolicy: OnFailure
+          containers:
+            - name: monitor
+              image: bitnami/kubectl:latest
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/bash"]
+              args: ["/scripts/monitor.sh"]
+              
+              # Load all configuration and secrets
+              envFrom:
+                - secretRef:
+                    name: quota-teams-webhook
+                - configMapRef:
+                    name: namespace-quota-monitor-config
+              
+              volumeMounts:
+                - name: monitor-script
+                  mountPath: /scripts
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                runAsUser: 1001
+                capabilities:
+                  drop:
+                    - ALL
+          volumes:
+            - name: monitor-script
+              configMap:
+                name: namespace-quota-monitor-script
+                defaultMode: 0755

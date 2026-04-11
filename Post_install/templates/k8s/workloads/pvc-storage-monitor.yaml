@@ -1,0 +1,423 @@
+---
+# ServiceAccount for PVC storage monitoring
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pvc-storage-monitor-sa
+  namespace: gt-operators
+
+---
+# ClusterRole with permissions to read PVCs and pods
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pvc-storage-monitor-role
+rules:
+  # Permission to read PVCs
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["list", "get"]
+  # Permission to read pods (to check PVC usage)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+  # Permission to read pods/exec (to check disk usage inside pods)
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  # Permission to read namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list", "get"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pvc-storage-monitor-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pvc-storage-monitor-role
+subjects:
+  - kind: ServiceAccount
+    name: pvc-storage-monitor-sa
+    namespace: gt-operators
+
+---
+# ConfigMap for PVC storage monitor configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pvc-storage-monitor-config
+  namespace: gt-operators
+data:
+  # Cluster Configuration
+  CLUSTER_NAME: "gtocpmyntpoc01"
+  
+  # Alert Thresholds
+  CRITICAL_THRESHOLD: "95"
+  WARNING_THRESHOLD: "90"
+  INFO_THRESHOLD: "80"
+  
+  # ServiceNow Configuration
+  SERVICENOW_ASSIGNMENT_GROUP: "{{ servicenow_assignment_group }}"
+  SERVICENOW_CATEGORY: "Kubernetes"
+  SERVICENOW_SUBCATEGORY: "PVC Storage"
+  SERVICENOW_CALLER_ID: "pvc-monitor-operator"
+  SERVICENOW_CONTACT_TYPE: "Monitoring"
+  
+  # Feature Flags
+  ENABLE_SERVICENOW: "true"
+  ENABLE_TEAMS_ALERTS: "true"
+
+---
+# Secret for Teams webhook URL and ServiceNow credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pvc-teams-webhook
+  namespace: gt-operators
+type: Opaque
+stringData:
+  # Teams webhook URL
+  TEAMS_WEBHOOK_URL: "{{ vault_teams_webhook_url }}"
+  
+  # ServiceNow credentials
+  SERVICENOW_INSTANCE: "{{ servicenow_instance }}"
+  SERVICENOW_USER: "{{ servicenow_user }}"
+  SERVICENOW_PASS: "{{ servicenow_password }}"
+
+---
+# ConfigMap containing the monitoring script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pvc-storage-monitor-script
+  namespace: gt-operators
+data:
+  monitor.sh: |
+    #!/bin/bash
+    # ============================================================
+    # PVC Storage Monitor
+    # Purpose: Monitor PVC disk usage and alert on high utilization
+    # ============================================================
+    
+    set -e
+    
+    echo "=========================================="
+    echo "PVC Storage Monitor Starting"
+    echo "Time: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "=========================================="
+    
+    # Configuration from ConfigMap/Secret
+    CLUSTER_NAME="${CLUSTER_NAME:-kubernetes-cluster}"
+    CRITICAL_THRESHOLD="${CRITICAL_THRESHOLD:-95}"
+    WARNING_THRESHOLD="${WARNING_THRESHOLD:-90}"
+    INFO_THRESHOLD="${INFO_THRESHOLD:-80}"
+    
+    echo "Cluster: $CLUSTER_NAME"
+    echo "Thresholds: INFO=${INFO_THRESHOLD}% WARNING=${WARNING_THRESHOLD}% CRITICAL=${CRITICAL_THRESHOLD}%"
+    echo ""
+    
+    # Check Teams webhook
+    WEBHOOK_URL="${TEAMS_WEBHOOK_URL}"
+    if [ -z "$WEBHOOK_URL" ] || [ "$WEBHOOK_URL" == "https://your-teams-webhook-url-here" ]; then
+      echo "⚠️  WARNING: Teams webhook not configured. Skipping notifications."
+      SEND_TEAMS=false
+    else
+      SEND_TEAMS=true
+    fi
+    
+    # Temp file
+    PVC_REPORT="/tmp/pvc_report_$$.txt"
+    > "$PVC_REPORT"
+    
+    # ===== SERVICENOW INTEGRATION =====
+    servicenow_api() {
+      [ "$ENABLE_SERVICENOW" != "true" ] && return 1
+      [ -z "$SERVICENOW_INSTANCE" ] || [ "$SERVICENOW_INSTANCE" == "your-instance.service-now.com" ] && return 1
+      
+      local action="$1"
+      local desc=$(printf '%s' "$2" | sed 's/"/\\"/g' | tr '\n' ' ')
+      
+      if [ "$action" == "create" ]; then
+        local payload="{\"short_description\":\"CRITICAL: PVC Storage Alert - ${CLUSTER_NAME}\",\"description\":\"${desc}\\n\\nCluster: ${CLUSTER_NAME}\\nTime: $(date)\",\"urgency\":\"1\",\"impact\":\"1\",\"priority\":\"1\",\"assignment_group\":\"$SERVICENOW_ASSIGNMENT_GROUP\",\"category\":\"$SERVICENOW_CATEGORY\",\"subcategory\":\"$SERVICENOW_SUBCATEGORY\",\"u_cluster_name\":\"$CLUSTER_NAME\",\"state\":\"1\"}"
+        local resp=$(curl -s -w "\n%{http_code}" -u "$SERVICENOW_USER:$SERVICENOW_PASS" -H "Content-Type: application/json" -d "$payload" "https://$SERVICENOW_INSTANCE/api/now/table/incident" 2>&1)
+        local code=$(echo "$resp" | tail -n1)
+        [ "$code" == "201" ] && echo "$resp" | head -n -1 | grep -o '"number":"[^"]*' | cut -d'"' -f4 && return 0
+        
+      elif [ "$action" == "check" ]; then
+        local ts=$(date -u -d "24 hours ago" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -v-24H '+%Y-%m-%d %H:%M:%S')
+        local resp=$(curl -s -w "\n%{http_code}" -u "$SERVICENOW_USER:$SERVICENOW_PASS" "https://$SERVICENOW_INSTANCE/api/now/table/incident?sysparm_query=u_cluster_name=${CLUSTER_NAME}^stateIN1,2,3^sys_created_on>=${ts}&sysparm_limit=1" 2>&1)
+        local code=$(echo "$resp" | tail -n1)
+        [ "$code" == "200" ] && echo "$resp" | head -n -1 | grep -o '"number":"[^"]*' | head -1 | cut -d'"' -f4 && return 0
+        
+      elif [ "$action" == "update" ]; then
+        local sys_id="$3"
+        local payload="{\"work_notes\":\"${desc}\"}"
+        curl -s -u "$SERVICENOW_USER:$SERVICENOW_PASS" -H "Content-Type: application/json" -X PATCH -d "$payload" "https://$SERVICENOW_INSTANCE/api/now/table/incident/$sys_id" >/dev/null && return 0
+      fi
+      return 1
+    }
+    
+    # Function to send Teams notification
+    send_teams_alert() {
+      local title="$1"
+      local message="$2"
+      local color="$3"
+      
+      if [ "$ENABLE_TEAMS_ALERTS" != "true" ]; then
+        echo "  ℹ️  Teams alerts disabled via configuration"
+        return 0
+      fi
+      
+      if [ "$SEND_TEAMS" != "true" ]; then
+        echo "  ⚠️  Teams notification skipped (webhook not configured)"
+        return
+      fi
+      
+      local payload=$(cat <<EOF
+    {
+      "@type": "MessageCard",
+      "@context": "https://schema.org/extensions",
+      "summary": "$title",
+      "themeColor": "$color",
+      "title": "$title",
+      "sections": [{
+        "activityTitle": "Cluster: $CLUSTER_NAME",
+        "activitySubtitle": "$(date '+%Y-%m-%d %H:%M:%S UTC')",
+        "facts": [
+          {
+            "name": "Cluster:",
+            "value": "$CLUSTER_NAME"
+          }
+        ],
+        "text": "$message",
+        "markdown": true
+      }]
+    }
+    EOF
+    )
+      
+      echo "  📤 Sending Teams notification..."
+      RESPONSE=$(curl -s -w "\n%{http_code}" -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL" 2>&1)
+      HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+      
+      if [ "$HTTP_CODE" == "200" ]; then
+        echo "  ✅ Teams notification sent successfully"
+      else
+        echo "  ❌ Teams notification failed (HTTP $HTTP_CODE)"
+      fi
+    }
+    
+    # Function to get PVC usage from metrics server (if available)
+    get_pvc_usage_metrics() {
+      local namespace="$1"
+      local pvc_name="$2"
+      
+      # Try to get usage from kubectl top (requires metrics-server)
+      USAGE=$(kubectl top pvc "$pvc_name" -n "$namespace" 2>/dev/null | tail -1 | awk '{print $2}' || echo "")
+      
+      if [ -n "$USAGE" ]; then
+        echo "$USAGE"
+      else
+        echo ""
+      fi
+    }
+    
+    # Function to check PVC usage by executing df inside pods
+    check_pvc_usage() {
+      local namespace="$1"
+      local pvc_name="$2"
+      local capacity="$3"
+      
+      echo "Checking PVC: $pvc_name in namespace: $namespace (Capacity: $capacity)"
+      
+      # Find pods using this PVC
+      PODS=$(kubectl get pods -n "$namespace" -o json | jq -r --arg pvc "$pvc_name" '.items[] | select(.spec.volumes[]?.persistentVolumeClaim.claimName == $pvc) | .metadata.name' 2>/dev/null || echo "")
+      
+      if [ -z "$PODS" ]; then
+        echo "  ℹ️  No pods currently using this PVC"
+        return
+      fi
+      
+      # Check usage in the first pod using this PVC
+      POD=$(echo "$PODS" | head -1)
+      echo "  Checking via pod: $POD"
+      
+      # Get the volume name from the PVC
+      VOLUME_NAME=$(kubectl get pod "$POD" -n "$namespace" -o json | jq -r --arg pvc "$pvc_name" '.spec.volumes[] | select(.persistentVolumeClaim.claimName == $pvc) | .name' 2>/dev/null | head -1 || echo "")
+      
+      if [ -z "$VOLUME_NAME" ]; then
+        echo "  ⚠️  Could not find volume for PVC"
+        return
+      fi
+      
+      # Get the mount path using the volume name
+      MOUNT_PATH=$(kubectl get pod "$POD" -n "$namespace" -o json | jq -r --arg vol "$VOLUME_NAME" '.spec.containers[].volumeMounts[] | select(.name == $vol) | .mountPath' 2>/dev/null | head -1 || echo "")
+      
+      if [ -z "$MOUNT_PATH" ]; then
+        echo "  ⚠️  Could not determine mount path"
+        return
+      fi
+      
+      echo "  Mount path: $MOUNT_PATH"
+      
+      # Execute df command in the pod to get disk usage
+      DF_OUTPUT=$(kubectl exec -n "$namespace" "$POD" -- df -h "$MOUNT_PATH" 2>/dev/null | tail -1 || echo "")
+      
+      if [ -z "$DF_OUTPUT" ]; then
+        echo "  ⚠️  Could not get disk usage from pod"
+        return
+      fi
+      
+      # Parse df output: Filesystem Size Used Avail Use% Mounted on
+      USED=$(echo "$DF_OUTPUT" | awk '{print $3}')
+      AVAILABLE=$(echo "$DF_OUTPUT" | awk '{print $4}')
+      USE_PERCENT=$(echo "$DF_OUTPUT" | awk '{print $5}' | tr -d '%')
+      
+      echo "  Used: $USED / Available: $AVAILABLE / Usage: ${USE_PERCENT}%"
+      
+      # Log to report
+      echo "PVC: $pvc_name" >> "$PVC_REPORT"
+      echo "  Namespace: $namespace" >> "$PVC_REPORT"
+      echo "  Capacity: $capacity" >> "$PVC_REPORT"
+      echo "  Used: $USED" >> "$PVC_REPORT"
+      echo "  Available: $AVAILABLE" >> "$PVC_REPORT"
+      echo "  Usage: ${USE_PERCENT}%" >> "$PVC_REPORT"
+      echo "  Pod: $POD" >> "$PVC_REPORT"
+      echo "" >> "$PVC_REPORT"
+      
+      # Determine alert level and send notification if needed
+      if [ "$USE_PERCENT" -ge "$CRITICAL_THRESHOLD" ]; then
+        local alert_msg="🚨 **CRITICAL: PVC Almost Full**  \\n\\n**PVC:** \`$pvc_name\`  \\n**Namespace:** \`$namespace\`  \\n**Capacity:** $capacity  \\n**Used:** $USED  \\n**Available:** $AVAILABLE  \\n**Usage:** ${USE_PERCENT}%  \\n**Pod:** \`$POD\`  \\n\\n⚠️ **Action Required:** Expand PVC or cleanup data immediately!"
+        
+        # Check for existing ServiceNow ticket
+        local ticket=$(servicenow_api "check")
+        
+        if [ -n "$ticket" ]; then
+          echo "  ℹ️  Updating existing ServiceNow ticket: $ticket"
+          local sys_id=$(curl -s -u "$SERVICENOW_USER:$SERVICENOW_PASS" "https://$SERVICENOW_INSTANCE/api/now/table/incident?sysparm_query=number=${ticket}&sysparm_limit=1" 2>/dev/null | grep -o '"sys_id":"[^"]*' | head -1 | cut -d'"' -f4)
+          servicenow_api "update" "PVC STORAGE ALERT: $namespace/$pvc_name at ${USE_PERCENT}% (Used: $USED, Available: $AVAILABLE, Capacity: $capacity). Pod: $POD" "$sys_id"
+          send_teams_alert "🔴 CRITICAL: PVC Storage at ${USE_PERCENT}%" "$alert_msg\\n\\n📋 Ticket: ${ticket} (updated)" "FF0000"
+        else
+          echo "  ℹ️  Creating new ServiceNow ticket"
+          ticket=$(servicenow_api "create" "PVC $namespace/$pvc_name critical at ${USE_PERCENT}% (Used: $USED, Available: $AVAILABLE, Capacity: $capacity). Pod: $POD")
+          [ -n "$ticket" ] && send_teams_alert "🔴 CRITICAL: PVC Storage at ${USE_PERCENT}%" "$alert_msg\\n\\n📋 Ticket: ${ticket}" "FF0000" || send_teams_alert "🔴 CRITICAL: PVC Storage at ${USE_PERCENT}%" "$alert_msg" "FF0000"
+        fi
+        
+        echo "  🔴 CRITICAL ALERT SENT (${USE_PERCENT}% used)"
+      elif [ "$USE_PERCENT" -ge "$WARNING_THRESHOLD" ]; then
+        local alert_msg="⚠️ **WARNING: PVC High Usage**  \\n\\n**PVC:** \`$pvc_name\`  \\n**Namespace:** \`$namespace\`  \\n**Capacity:** $capacity  \\n**Used:** $USED  \\n**Available:** $AVAILABLE  \\n**Usage:** ${USE_PERCENT}%  \\n**Pod:** \`$POD\`  \\n\\n⚠️ **Action Recommended:** Plan to expand PVC or cleanup data soon."
+        send_teams_alert "🟠 WARNING: PVC Storage at ${USE_PERCENT}%" "$alert_msg" "FFA500"
+        echo "  🟠 WARNING ALERT SENT (${USE_PERCENT}% used)"
+      elif [ "$USE_PERCENT" -ge "$INFO_THRESHOLD" ]; then
+        echo "  ℹ️  INFO: PVC usage at ${USE_PERCENT}% (no alert sent)"
+      else
+        echo "  ✅ OK: PVC usage at ${USE_PERCENT}%"
+      fi
+    }
+    
+    echo ""
+    echo "=== Scanning PersistentVolumeClaims ==="
+    
+    # Get all PVCs across all namespaces
+    PVC_COUNT=0
+    kubectl get pvc -A -o json | jq -r '.items[] | "\(.metadata.namespace)|\(.metadata.name)|\(.spec.resources.requests.storage)"' | while IFS='|' read -r namespace pvc_name capacity; do
+      if [ -n "$pvc_name" ]; then
+        check_pvc_usage "$namespace" "$pvc_name" "$capacity"
+        PVC_COUNT=$((PVC_COUNT + 1))
+        echo ""
+      fi
+    done
+    
+    echo ""
+    echo "=========================================="
+    echo "PVC Storage Scan Complete"
+    echo "Report saved to: $PVC_REPORT"
+    echo "=========================================="
+    
+    # Display summary
+    if [ -s "$PVC_REPORT" ]; then
+      echo ""
+      echo "=== Storage Usage Summary ==="
+      cat "$PVC_REPORT"
+      
+      # Find top storage consumers
+      echo ""
+      echo "=== Top Storage Consumers ==="
+      grep "Usage:" "$PVC_REPORT" | sort -t: -k2 -n -r | head -5
+    else
+      echo "No PVC usage data collected"
+    fi
+    
+    # Cleanup
+    rm -f "$PVC_REPORT"
+    
+    exit 0
+
+---
+# CronJob to run PVC storage monitoring
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pvc-storage-monitor
+  namespace: gt-operators
+spec:
+  # Run every hour
+  schedule: "0 * * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 3600  # Keep job for 1 hour
+      template:
+        metadata:
+          labels:
+            app: pvc-storage-monitor
+        spec:
+          serviceAccountName: pvc-storage-monitor-sa
+{% if enable_registry_secret | default(false) %}
+          imagePullSecrets:
+            - name: regcred
+{% endif %}
+          restartPolicy: OnFailure
+          containers:
+            - name: monitor
+              image: bitnami/kubectl:latest
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/bash"]
+              args: ["/scripts/monitor.sh"]
+              
+              # Load all configuration and secrets
+              envFrom:
+                - secretRef:
+                    name: pvc-teams-webhook
+                - configMapRef:
+                    name: pvc-storage-monitor-config
+              
+              volumeMounts:
+                - name: monitor-script
+                  mountPath: /scripts
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                runAsUser: 1001
+                capabilities:
+                  drop:
+                    - ALL
+          volumes:
+            - name: monitor-script
+              configMap:
+                name: pvc-storage-monitor-script
+                defaultMode: 0755

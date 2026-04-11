@@ -1,0 +1,14 @@
+# kdump.conf - Production configuration for kernel crash dumps
+# Path to save crash dumps (default: /var/crash)
+path {{ kdump_path | default('/var/crash') }}
+
+# Core collector with compression and filtering (excludes free pages, cache, etc.)
+# -l: Use compression (significant space savings)
+# -d 31: Dump level 31 (excludes free pages, cache pages, user pages, etc.)
+# --message-level 1: Minimal output
+core_collector makedumpfile -l --message-level 1 -d 31
+
+# Action after creating vmcore dump
+# reboot: Node automatically reboots after dump (production HA clusters)
+# poweroff: Node powers off for manual investigation (more conservative)
+default {{ kdump_default_action | default('reboot') }}

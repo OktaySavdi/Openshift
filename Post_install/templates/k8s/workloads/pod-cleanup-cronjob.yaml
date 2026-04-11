@@ -1,0 +1,292 @@
+---
+# ServiceAccount for pod cleanup job
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-cleanup-sa
+  namespace: gt-operators
+
+---
+# ClusterRole with permissions to list and delete pods across all namespaces
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pod-cleanup-role
+rules:
+  # Permission to list pods in all namespaces
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get", "delete"]
+
+---
+# ClusterRoleBinding to grant the ServiceAccount cluster-wide permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pod-cleanup-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pod-cleanup-role
+subjects:
+  - kind: ServiceAccount
+    name: pod-cleanup-sa
+    namespace: gt-operators
+
+---
+# Secret for Teams webhook
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pod-cleanup-webhook
+  namespace: gt-operators
+type: Opaque
+stringData:
+  TEAMS_WEBHOOK_URL: "{{ vault_teams_webhook_url }}"
+
+---
+# ConfigMap for pod cleanup configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pod-cleanup-config
+  namespace: gt-operators
+data:
+  CLUSTER_NAME: "gtocpmyntpoc01"
+  ENABLE_TEAMS_ALERTS: "true"
+  ENABLE_SUCCESS_NOTIFICATIONS: "true"  # Set to "true" to get Teams notification on successful cleanup
+
+---
+# ConfigMap containing the cleanup script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pod-cleanup-script
+  namespace: gt-operators
+data:
+  cleanup.sh: |
+    #!/bin/bash
+    # ============================================================
+    # Pod Cleanup Script
+    # Purpose: Delete pods in unwanted states (Evicted, Completed, 
+    #          Terminating, Error) across all namespaces
+    # ============================================================
+    
+    set -e
+    
+    echo "======================================"
+    echo "Starting Pod Cleanup"
+    echo "Cluster: $CLUSTER_NAME"
+    echo "Time: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "======================================"
+    
+    # Function to send Teams notification
+    send_teams_notification() {
+      local title="$1"
+      local message="$2"
+      local color="$3"
+      
+      [ "$ENABLE_TEAMS_ALERTS" != "true" ] && return 0
+      [ -z "$TEAMS_WEBHOOK_URL" ] && return 1
+      
+      local payload=$(cat <<EOF
+    {
+      "@type": "MessageCard",
+      "@context": "https://schema.org/extensions",
+      "summary": "$title",
+      "themeColor": "$color",
+      "title": "$title",
+      "sections": [{
+        "activityTitle": "Pod Cleanup Report",
+        "activitySubtitle": "$(date '+%Y-%m-%d %H:%M:%S UTC')",
+        "facts": [{"name": "Cluster:", "value": "$CLUSTER_NAME"}],
+        "text": "$message",
+        "markdown": true
+      }]
+    }
+    EOF
+    )
+      
+      curl -s -H "Content-Type: application/json" -d "$payload" "$TEAMS_WEBHOOK_URL" >/dev/null 2>&1
+    }
+    
+    # Get all pods across all namespaces
+    echo "Scanning all namespaces for pods to cleanup..."
+    
+    # Counter files for tracking (use temp files to persist across subshells)
+    COUNTER_FILE="/tmp/pod_cleanup_counter_$$"
+    SUCCEEDED_FILE="/tmp/succeeded_$$"
+    FAILED_FILE="/tmp/failed_$$"
+    EVICTED_FILE="/tmp/evicted_$$"
+    TERMINATING_FILE="/tmp/terminating_$$"
+    echo "0" > "$COUNTER_FILE"
+    echo "0" > "$SUCCEEDED_FILE"
+    echo "0" > "$FAILED_FILE"
+    echo "0" > "$EVICTED_FILE"
+    echo "0" > "$TERMINATING_FILE"
+    
+    # Method 1: Delete pods with status.phase = Succeeded or Failed
+    echo ""
+    echo "Checking for Succeeded (Completed) pods..."
+    kubectl get pods -A --field-selector=status.phase=Succeeded --no-headers 2>/dev/null | while read -r line; do
+      NAMESPACE=$(echo "$line" | awk '{print $1}')
+      POD_NAME=$(echo "$line" | awk '{print $2}')
+      echo "  Deleting pod: $POD_NAME in namespace: $NAMESPACE (State: Succeeded)"
+      if kubectl delete pod "$POD_NAME" -n "$NAMESPACE" --grace-period=0 --force 2>/dev/null; then
+        echo $(($(cat "$COUNTER_FILE") + 1)) > "$COUNTER_FILE"
+        echo $(($(cat "$SUCCEEDED_FILE") + 1)) > "$SUCCEEDED_FILE"
+        echo "    ✅ Successfully deleted"
+      fi
+    done
+    
+    echo ""
+    echo "Checking for Failed pods..."
+    kubectl get pods -A --field-selector=status.phase=Failed --no-headers 2>/dev/null | while read -r line; do
+      NAMESPACE=$(echo "$line" | awk '{print $1}')
+      POD_NAME=$(echo "$line" | awk '{print $2}')
+      echo "  Deleting pod: $POD_NAME in namespace: $NAMESPACE (State: Failed)"
+      if kubectl delete pod "$POD_NAME" -n "$NAMESPACE" --grace-period=0 --force 2>/dev/null; then
+        echo $(($(cat "$COUNTER_FILE") + 1)) > "$COUNTER_FILE"
+        echo $(($(cat "$FAILED_FILE") + 1)) > "$FAILED_FILE"
+        echo "    ✅ Successfully deleted"
+      fi
+    done
+    
+    # Method 2: Delete pods with specific status reasons (Evicted, Error)
+    echo ""
+    echo "Checking for Evicted pods..."
+    kubectl get pods -A -o json 2>/dev/null | \
+      jq -r '.items[] | select(.status.reason=="Evicted") | "\(.metadata.namespace) \(.metadata.name)"' | \
+      while read -r NAMESPACE POD_NAME; do
+        if [ -n "$POD_NAME" ]; then
+          echo "  Deleting pod: $POD_NAME in namespace: $NAMESPACE (State: Evicted)"
+          if kubectl delete pod "$POD_NAME" -n "$NAMESPACE" --grace-period=0 --force 2>/dev/null; then
+            echo $(($(cat "$COUNTER_FILE") + 1)) > "$COUNTER_FILE"
+            echo $(($(cat "$EVICTED_FILE") + 1)) > "$EVICTED_FILE"
+            echo "    ✅ Successfully deleted"
+          fi
+        fi
+      done
+    
+    # Method 3: Delete terminating pods that are stuck
+    echo ""
+    echo "Checking for stuck Terminating pods..."
+    kubectl get pods -A --no-headers 2>/dev/null | grep Terminating | while read -r line; do
+      NAMESPACE=$(echo "$line" | awk '{print $1}')
+      POD_NAME=$(echo "$line" | awk '{print $2}')
+      echo "  Force deleting pod: $POD_NAME in namespace: $NAMESPACE (State: Terminating)"
+      if kubectl delete pod "$POD_NAME" -n "$NAMESPACE" --grace-period=0 --force 2>/dev/null; then
+        echo $(($(cat "$COUNTER_FILE") + 1)) > "$COUNTER_FILE"
+        echo $(($(cat "$TERMINATING_FILE") + 1)) > "$TERMINATING_FILE"
+        echo "    ✅ Successfully deleted"
+      fi
+    done
+    
+    # Read final counts
+    DELETED_COUNT=$(cat "$COUNTER_FILE")
+    SUCCEEDED_COUNT=$(cat "$SUCCEEDED_FILE")
+    FAILED_COUNT=$(cat "$FAILED_FILE")
+    EVICTED_COUNT=$(cat "$EVICTED_FILE")
+    TERMINATING_COUNT=$(cat "$TERMINATING_FILE")
+    
+    echo ""
+    echo "======================================"
+    echo "Cleanup Summary"
+    echo "Total pods deleted: $DELETED_COUNT"
+    echo "  Succeeded: $SUCCEEDED_COUNT"
+    echo "  Failed: $FAILED_COUNT"
+    echo "  Evicted: $EVICTED_COUNT"
+    echo "  Terminating: $TERMINATING_COUNT"
+    echo "Completed: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "======================================"
+    
+    # Send Teams notification if enabled
+    if [ "$DELETED_COUNT" -gt 0 ] || [ "$ENABLE_SUCCESS_NOTIFICATIONS" == "true" ]; then
+      if [ "$DELETED_COUNT" -gt 0 ]; then
+        TEAMS_MSG="🧹 **Pod Cleanup Completed**  \\n\\n"
+        TEAMS_MSG="${TEAMS_MSG}**Cluster:** \`$CLUSTER_NAME\`  \\n"
+        TEAMS_MSG="${TEAMS_MSG}**Total Deleted:** $DELETED_COUNT pods  \\n\\n"
+        TEAMS_MSG="${TEAMS_MSG}**Breakdown:**  \\n"
+        TEAMS_MSG="${TEAMS_MSG}- Succeeded: $SUCCEEDED_COUNT  \\n"
+        TEAMS_MSG="${TEAMS_MSG}- Failed: $FAILED_COUNT  \\n"
+        TEAMS_MSG="${TEAMS_MSG}- Evicted: $EVICTED_COUNT  \\n"
+        TEAMS_MSG="${TEAMS_MSG}- Terminating: $TERMINATING_COUNT  \\n"
+        send_teams_notification "Pod Cleanup - $CLUSTER_NAME" "$TEAMS_MSG" "00AA00"
+      elif [ "$ENABLE_SUCCESS_NOTIFICATIONS" == "true" ]; then
+        TEAMS_MSG="✅ **Pod Cleanup Completed**  \\n\\n"
+        TEAMS_MSG="${TEAMS_MSG}**Cluster:** \`$CLUSTER_NAME\`  \\n"
+        TEAMS_MSG="${TEAMS_MSG}**Result:** No pods required cleanup  \\n"
+        send_teams_notification "Pod Cleanup - $CLUSTER_NAME" "$TEAMS_MSG" "0078D4"
+      fi
+    fi
+    
+    # Cleanup temp files
+    rm -f "$COUNTER_FILE" "$SUCCEEDED_FILE" "$FAILED_FILE" "$EVICTED_FILE" "$TERMINATING_FILE"
+    
+    exit 0
+
+---
+# CronJob to run cleanup every night at 2 AM
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pod-cleanup
+  namespace: gt-operators
+spec:
+  # Run every night at 2:00 AM (adjust timezone as needed)
+  schedule: "0 3 * * *"
+  # Keep last 5 successful and 3 failed jobs for history
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 3
+  # Don't allow concurrent runs
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      # Clean up completed jobs after 1 hour
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app: pod-cleanup
+        spec:
+          serviceAccountName: pod-cleanup-sa
+{% if enable_registry_secret | default(false) %}
+          imagePullSecrets:
+            - name: regcred
+{% endif %}
+          restartPolicy: OnFailure
+          containers:
+            - name: cleanup
+              image: bitnami/kubectl:latest
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/bash"]
+              args: ["/scripts/cleanup.sh"]
+              # Load configuration from ConfigMap and Secret
+              envFrom:
+                - secretRef:
+                    name: pod-cleanup-webhook
+                - configMapRef:
+                    name: pod-cleanup-config
+              volumeMounts:
+                - name: cleanup-script
+                  mountPath: /scripts
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              # Security context
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                runAsUser: 1001
+                capabilities:
+                  drop:
+                    - ALL
+          volumes:
+            - name: cleanup-script
+              configMap:
+                name: pod-cleanup-script
+                defaultMode: 0755

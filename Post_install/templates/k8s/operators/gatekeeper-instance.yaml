@@ -1,0 +1,57 @@
+---
+apiVersion: operator.gatekeeper.sh/v1alpha1
+kind: Gatekeeper
+metadata:
+  name: gatekeeper
+  namespace: openshift-gatekeeper-system
+spec:
+  # Audit configuration
+  audit:
+    replicas: 1
+    auditInterval: 60s
+    constraintViolationLimit: 20
+    auditFromCache: Automatic
+    logLevel: INFO
+    auditChunkSize: 500
+  
+  # Validating webhook configuration  
+  validatingWebhook: Enabled
+  
+  # Webhook settings
+  webhook:
+    replicas: 2
+    failurePolicy: Ignore  # Don't block on webhook failures
+    namespaceSelector:
+      matchExpressions:
+        - key: admission.gatekeeper.sh/ignore
+          operator: DoesNotExist
+    
+  # Mutation webhook (disabled by default)
+  mutatingWebhook: Disabled
+  
+  # Node selector for pod placement
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: control-plane
+                  operator: In
+                  values:
+                    - controller-manager
+            topologyKey: kubernetes.io/hostname
+  
+  # Resource limits
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  
+  # Image (uses operator's default)
+  image:
+    pullPolicy: IfNotPresent

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ldap-group-whitelist
+  namespace: openshift-config
+data:
+  whitelist.txt: |
+{% if ldap_group_whitelist is defined and ldap_group_whitelist | length > 0 %}
+{% for group in ldap_group_whitelist %}
+    {{ group }}
+{% endfor %}
+{% else %}
+    # No specific groups whitelisted - sync all groups
+{% endif %}

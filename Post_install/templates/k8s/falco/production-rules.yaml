@@ -1,0 +1,288 @@
+---
+# Production-Grade Falco Custom Rules for OpenShift
+# Uses default Falco macros: spawned_process, container, open_read, open_write, outbound
+# Reference: https://falco.org/docs/reference/rules/default-macros/
+
+customRules:
+  production-security.yaml: |-
+    ###########################################
+    # LISTS - Collections of items
+    ###########################################
+    
+    - list: package_mgmt_binaries
+      items: [apt, apt-get, apk, dpkg, rpm, yum, dnf, zypper, pip, pip3, npm, gem, composer]
+    
+    - list: shell_binaries
+      items: [bash, sh, zsh, ksh, csh, tcsh, dash]
+    
+    - list: network_tools
+      items: [nmap, masscan, zmap, nc, netcat, ncat, socat]
+    
+    - list: sensitive_file_paths
+      items: [/etc/shadow, /etc/gshadow, /etc/passwd, /etc/sudoers]
+    
+    - list: crypto_miners
+      items: [xmrig, minerd, cpuminer, ethminer, t-rex]
+    
+    ###########################################
+    # MACROS - Reusable conditions
+    ###########################################
+    
+    - macro: user_known_package_manager_in_container
+      condition: (never_true)
+    
+    - macro: user_sensitive_mount_containers
+      condition: (never_true)
+    
+    ###########################################
+    # CONTAINER SECURITY RULES
+    ###########################################
+    
+    - rule: Unauthorized Package Management in Production Container
+      desc: Detect package manager execution in production containers
+      condition: >
+        spawned_process and container and
+        proc.name in (package_mgmt_binaries) and
+        not k8s.ns.name startswith "openshift-" and
+        not k8s.ns.name in (kube-system, development, dev, test, falco, monitoring, default) and
+        not user_known_package_manager_in_container
+      output: >
+        Package manager executed in production container (user=%user.name command=%proc.cmdline
+        container=%container.name namespace=%k8s.ns.name image=%container.image.repository)
+      priority: ERROR
+      tags: [container, package_mgmt, mitre_execution]
+    
+    - rule: Container Running Interactive Shell
+      desc: Detect interactive shell in production containers
+      condition: >
+        spawned_process and container and
+        proc.name in (shell_binaries) and
+        proc.tty != 0 and
+        not k8s.ns.name startswith "openshift-" and
+        not k8s.ns.name in (kube-system, falco, monitoring, default)
+      output: >
+        Interactive shell spawned in container (user=%user.name shell=%proc.name
+        container=%container.name namespace=%k8s.ns.name command=%proc.cmdline)
+      priority: NOTICE
+      tags: [container, shell, mitre_execution]
+    
+    ###########################################
+    # PRIVILEGE ESCALATION
+    ###########################################
+    
+    - rule: Privilege Escalation via SetUID
+      desc: Detect attempts to change user ID using setuid binaries
+      condition: >
+        spawned_process and container and
+        proc.name in (sudo, su) and
+        not user.name=root
+      output: >
+        Privilege escalation attempt (user=%user.name command=%proc.cmdline
+        container=%container.name namespace=%k8s.ns.name)
+      priority: CRITICAL
+      tags: [privilege_escalation, mitre_privilege_escalation]
+    
+    ###########################################
+    # PERSISTENCE MECHANISMS
+    ###########################################
+    
+    - rule: Cron Job Created in Container
+      desc: Detect creation of cron jobs for persistence
+      condition: >
+        spawned_process and container and
+        proc.name=crontab
+      output: >
+        Cron job modification in container (user=%user.name command=%proc.cmdline
+        container=%container.name namespace=%k8s.ns.name)
+      priority: ALERT
+      tags: [persistence, mitre_persistence]
+    
+    ###########################################
+    # CREDENTIAL ACCESS
+    ###########################################
+    
+    - rule: Read Sensitive Files
+      desc: Detect reads of sensitive credential files
+      condition: >
+        open_read and container and
+        fd.name in (sensitive_file_paths)
+      output: >
+        Sensitive file accessed (user=%user.name file=%fd.name process=%proc.name
+        container=%container.name namespace=%k8s.ns.name)
+      priority: WARNING
+      tags: [credential_access, mitre_credential_access]
+    
+    - rule: Kubernetes Service Account Token Access
+      desc: Detect access to mounted Kubernetes service account tokens
+      condition: >
+        open_read and container and
+        fd.name startswith /var/run/secrets/kubernetes.io/serviceaccount/ and
+        not proc.name in (kubelet, crio, conmon, oc, kubectl)
+      output: >
+        Service account token accessed (user=%user.name file=%fd.name
+        process=%proc.name container=%container.name pod=%k8s.pod.name)
+      priority: NOTICE
+      tags: [credential_access, kubernetes]
+    
+    ###########################################
+    # NETWORK SECURITY
+    ###########################################
+    
+    - rule: Reverse Shell Detected
+      desc: Detect common reverse shell patterns
+      condition: >
+        spawned_process and container and
+        ((proc.name in (shell_binaries) and proc.args contains "-i") or
+        proc.cmdline contains "nc -e" or
+        proc.cmdline contains "/dev/tcp/")
+      output: >
+        Reverse shell detected (user=%user.name command=%proc.cmdline
+        container=%container.name namespace=%k8s.ns.name)
+      priority: ALERT
+      tags: [shell, mitre_execution]
+    
+    - rule: Network Scanning Tool Execution
+      desc: Detect execution of network scanning tools
+      condition: >
+        spawned_process and container and
+        proc.name in (network_tools)
+      output: >
+        Network scanning tool executed (user=%user.name tool=%proc.name command=%proc.cmdline
+        container=%container.name namespace=%k8s.ns.name)
+      priority: ERROR
+      tags: [network, reconnaissance, mitre_discovery]
+    
+    - rule: Suspicious Outbound Connection
+      desc: Detect outbound connections to non-standard ports
+      condition: >
+        outbound and container and
+        fd.lport in (25, 587, 465, 110, 995, 143, 993, 1433, 3306, 5432, 6379, 27017) and
+        not k8s.ns.name startswith "openshift-" and
+        not k8s.ns.name in (kube-system, falco, monitoring, default)
+      output: >
+        Suspicious outbound connection (connection=%fd.name local_port=%fd.lport remote_port=%fd.rport
+        container=%container.name namespace=%k8s.ns.name process=%proc.name)
+      priority: WARNING
+      tags: [network, exfiltration, mitre_exfiltration]
+    
+    ###########################################
+    # FILE SYSTEM SECURITY
+    ###########################################
+    
+    - rule: Write to System Binary Directory
+      desc: Detect writes to system binary directories
+      condition: >
+        open_write and container and
+        (fd.directory in (/bin, /sbin, /usr/bin, /usr/sbin))
+      output: >
+        Write to binary directory (user=%user.name file=%fd.name
+        container=%container.name namespace=%k8s.ns.name process=%proc.name)
+      priority: ERROR
+      tags: [filesystem, mitre_persistence]
+    
+    - rule: File Download Detected
+      desc: Detect file downloads using curl or wget
+      condition: >
+        spawned_process and container and
+        proc.name in (curl, wget) and
+        (proc.cmdline contains "http://" or proc.cmdline contains "https://")
+      output: >
+        File download detected (user=%user.name command=%proc.cmdline
+        container=%container.name namespace=%k8s.ns.name)
+      priority: NOTICE
+      tags: [network, mitre_command_and_control]
+    
+    - rule: Cryptomining Activity
+      desc: Detect execution of known cryptomining binaries
+      condition: >
+        spawned_process and container and
+        (proc.name in (crypto_miners) or
+        proc.cmdline contains "stratum+tcp" or
+        proc.cmdline contains "cryptonight")
+      output: >
+        Cryptomining activity detected (user=%user.name command=%proc.cmdline
+        container=%container.name namespace=%k8s.ns.name)
+      priority: CRITICAL
+      tags: [cryptomining, mitre_impact]
+    
+    ###########################################
+    # KUBERNETES-SPECIFIC RULES
+    ###########################################
+    
+    - rule: Kubectl Execution in Container
+      desc: Detect kubectl execution in containers (potential cluster access)
+      condition: >
+        spawned_process and container and
+        proc.name in (kubectl, oc) and
+        not k8s.ns.name startswith "openshift-" and
+        not k8s.ns.name in (kube-system, falco, monitoring, default)
+      output: >
+        Kubernetes CLI executed in container (user=%user.name command=%proc.cmdline
+        container=%container.name namespace=%k8s.ns.name pod=%k8s.pod.name)
+      priority: WARNING
+      tags: [kubernetes, mitre_execution]
+    
+    ###########################################
+    # OPENSHIFT-SPECIFIC RULES
+    ###########################################
+    
+    - rule: Privileged Container Started
+      desc: Detect containers running with privileged security context
+      condition: >
+        evt.type in (container, execve, execveat) and
+        container and
+        container.privileged=true and
+        not k8s.ns.name startswith "openshift-" and
+        not k8s.ns.name in (kube-system, falco, monitoring, default)
+      output: >
+        Privileged container detected (container=%container.name namespace=%k8s.ns.name
+        pod=%k8s.pod.name image=%container.image.repository)
+      priority: ERROR
+      tags: [openshift, scc, privilege]
+    
+    ###########################################
+    # DATA EXFILTRATION
+    ###########################################
+    
+    - rule: Database Dump Command
+      desc: Detect database dump commands
+      condition: >
+        spawned_process and container and
+        proc.name in (pg_dump, mysqldump, mongodump)
+      output: >
+        Database dump command executed (user=%user.name command=%proc.cmdline
+        container=%container.name namespace=%k8s.ns.name)
+      priority: WARNING
+      tags: [data_exfiltration, mitre_collection]
+    
+    ###########################################
+    # COMPLIANCE & SECURITY BEST PRACTICES
+    ###########################################
+    
+    - rule: SSH Server in Container
+      desc: Detect SSH server process in containers
+      condition: >
+        spawned_process and container and
+        proc.name=sshd
+      output: >
+        SSH server started in container (user=%user.name command=%proc.cmdline
+        container=%container.name namespace=%k8s.ns.name)
+      priority: WARNING
+      tags: [compliance, ssh]
+    
+    - rule: Container with Sensitive Host Mount
+      desc: Detect containers with sensitive host paths mounted
+      condition: >
+        evt.type in (container, execve, execveat) and
+        container and
+        (container.mounts contains "/host" or
+        container.mounts contains "/proc" or
+        container.mounts contains "/var/run/docker.sock") and
+        not k8s.ns.name startswith "openshift-" and
+        not k8s.ns.name in (kube-system, falco, monitoring, default) and
+        not user_sensitive_mount_containers
+      output: >
+        Container with sensitive host mount (container=%container.name namespace=%k8s.ns.name
+        mounts=%container.mounts pod=%k8s.pod.name)
+      priority: WARNING
+      tags: [compliance, mount]

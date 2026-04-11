@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: "{{ registry_pvc_name }}"
+  namespace: openshift-image-registry
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: "{{ registry_storage_size }}"
+{% if registry_storage_class is defined and registry_storage_class != '' %}
+  storageClassName: "{{ registry_storage_class }}"
+{% endif %}

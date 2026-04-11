@@ -1,0 +1,10 @@
+# Namespace for etcd backup resources
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gt-operators
+  labels:
+    # Pod Security Standards: Allow privileged pods (required for etcd access)
+    pod-security.kubernetes.io/enforce: privileged  # Enforce privileged security level
+    pod-security.kubernetes.io/audit: privileged     # Audit privileged violations
+    pod-security.kubernetes.io/warn: privileged      # Warn about privileged violations

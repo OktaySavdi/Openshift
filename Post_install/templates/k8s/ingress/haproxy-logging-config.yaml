@@ -1,0 +1,46 @@
+---
+# HAProxy Access Logging Configuration for OpenShift Ingress Controller
+# This enables detailed access logs for all HTTP/HTTPS traffic through HAProxy routers
+#
+# Log Format: connection:message (e.g., "connection:client_ip=%ci client_port=%cp")
+# Logs are written to stdout and accessible via: oc logs -n openshift-ingress <router-pod>
+#
+# Available log variables:
+# - %ci: Client IP address
+# - %cp: Client port
+# - %t: Time of request
+# - %r: HTTP request line (method, URI, version)
+# - %ST: HTTP status code
+# - %B: Bytes sent (response body)
+# - %U: Bytes uploaded (request body)
+# - %Tq: Time to receive request
+# - %Tw: Time in queue
+# - %Tc: Time to establish connection
+# - %Tr: Time to receive response
+# - %Tt: Total time
+#
+# Reference: https://docs.openshift.com/container-platform/latest/networking/ingress-operator.html
+
+apiVersion: operator.openshift.io/v1
+kind: IngressController
+metadata:
+  name: default
+  namespace: openshift-ingress-operator
+spec:
+  logging:
+    access:
+      # Destination for access logs (stdout writes to container logs)
+      destination:
+        type: Container
+      
+      # HTTP log format - logs all HTTP/HTTPS requests
+      httpLogFormat: >-
+        %ci:%cp [%t] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %CC %CS %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %{+Q}r
+      
+      # Optionally configure for syslog destination instead:
+      # destination:
+      #   type: Syslog
+      #   syslog:
+      #     address: "{{ syslog_server }}"
+      #     port: {{ syslog_port | default(514) }}
+      #     facility: local1

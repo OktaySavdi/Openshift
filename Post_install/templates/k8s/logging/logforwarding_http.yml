@@ -1,0 +1,231 @@
+
+---
+# ServiceAccount for log collector
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: collector
+  namespace: openshift-logging
+---
+# ClusterRoleBinding for application logs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: collector-application-logs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: collect-application-logs
+subjects:
+  - kind: ServiceAccount
+    name: collector
+    namespace: openshift-logging
+---
+# ClusterRoleBinding for infrastructure logs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: collector-infrastructure-logs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: collect-infrastructure-logs
+subjects:
+  - kind: ServiceAccount
+    name: collector
+    namespace: openshift-logging
+---
+# ClusterRoleBinding for audit logs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: collector-audit-logs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: collect-audit-logs
+subjects:
+  - kind: ServiceAccount
+    name: collector
+    namespace: openshift-logging
+---
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: http-log-forwarder
+  namespace: openshift-logging
+spec:
+  serviceAccount:
+    name: collector
+  collector:
+    resources:
+      limits:
+        cpu: 2
+        memory: 1Gi
+      requests:
+        cpu: 200m
+        memory: 768Mi
+  filters: # Define log processing rules before forwarding (drop, redact, transform)
+    
+    # ============================================================
+    # MULTILINE DETECTION
+    # ============================================================
+    # Detects and combines multi-line exception stack traces into single log entries
+    # Useful for: Java, Python, Node.js stack traces
+    - name: enablemultiline
+      type: detectMultilineException
+    
+    # ============================================================
+    # APPLICATION LOG FILTERS
+    # ============================================================
+    # Drops logs from OpenShift system namespaces to reduce noise
+    # Targets: openshift-*, kube-*, default namespaces
+    # EXCEPTIONS: 
+    #   - openshift-ingress: HAProxy access logs
+    #   - falco: Security runtime detection logs (JSON formatted)
+    # Note: Uses notMatches to allow exceptions while dropping other system namespaces
+    - name: drop-system-namespaces
+      type: drop
+      drop:
+        # Drop kube-* namespaces
+        - test:
+            - field: .kubernetes.namespace_name
+              matches: "^kube-.*$"
+        # Drop default namespace
+        - test:
+            - field: .kubernetes.namespace_name
+              matches: "^default$"
+        # Drop openshift-* namespaces EXCEPT openshift-ingress
+        - test:
+            - field: .kubernetes.namespace_name
+              matches: "^openshift-.*$"
+            - field: .kubernetes.namespace_name
+              notMatches: "^openshift-ingress$"
+        # REMOVED: Do not drop falco namespace - we want security alerts in centralized logging
+    
+    # Drops health check and readiness probe logs to reduce volume
+    # Matches: /healthz, /ready, /metrics endpoints and probe messages
+    - name: drop-probes-regex
+      type: drop
+      drop:
+        - test:
+            - field: .message
+              matches: '(?i)(get\s+(/healthz|/ready|/metrics))|probe\s+succeeded|health\s+check'
+    
+    # Drops trace and debug level logs, plus empty/null messages
+    # Reduces log volume while keeping info, warning, error, fatal levels
+    - name: drop-lowlevel
+      type: drop
+      drop:
+        - test:
+            - field: .level
+              matches: "^(trace|debug)$"
+        - test:
+            - field: .message
+              matches: "^(\\s*|-|null|NULL|~)$"
+    
+    # ============================================================
+    # INFRASTRUCTURE LOG FILTERS
+    # ============================================================
+    # Filters infrastructure logs to keep only critical system components
+    # Drops: OVS networking components, non-essential systemd services
+    # Keeps: kernel, kubelet, crio, systemd core services
+    # Keeps: Essential k8s namespaces (kube-system, etcd, api-server, etc.)
+    - name: filter-infra-logs
+      type: drop
+      drop:
+        # Drop verbose OVS/OVN networking logs (usually too noisy)
+        - test:
+            - field: .systemd.t.SYSLOG_IDENTIFIER
+              matches: "^(ovs-vswitchd|ovsdb-server|ovn-controller|ovn-northd|NetworkManager)$"
+        # Drop systemd services that aren't core infrastructure
+        - test:
+            - field: .systemd.t.SYSLOG_IDENTIFIER
+              notMatches: "^(kernel|kubelet|crio|systemd)$"
+        # Only keep logs from critical k8s infrastructure namespaces
+        - test:
+            - field: .kubernetes.namespace_name
+              notMatches: "^(kube-system|openshift-kube-apiserver|openshift-kube-controller-manager|openshift-kube-scheduler|openshift-etcd)$"
+    
+    # ============================================================
+    # AUDIT LOG FILTERS
+    # ============================================================
+    # Reduces Kubernetes API audit log volume by filtering low-value events
+    # Omits: RequestReceived, ResponseStarted stages (incomplete data)
+    # Drops: GET/LIST/WATCH operations, system service account read operations
+    # Strips: Large request/response bodies from write operations (keeps metadata)
+    - name: drop-ocp-audit
+      type: kubeAPIAudit
+      kubeAPIAudit:
+        omitStages:
+          - RequestReceived  # Incomplete request info
+          - ResponseStarted  # Incomplete response info
+        rules:
+          # Drop all read-only operations (GET, LIST, WATCH)
+          - level: None
+            verbs: ["get", "list", "watch"]
+          # Drop system service account read operations
+          - level: None
+            users: ["system:*"]
+            verbs: ["get", "list", "watch"]
+          # Keep write operations but strip large request/response bodies
+          - level: Metadata 
+            verbs: ["delete", "create", "update", "patch"]
+          # Catch-all: keep full details for remaining events
+          - level: RequestResponse
+            user: ["*"]
+  
+  inputs: # Define log sources: application pods, infrastructure components, and audit logs
+    - name: audit
+      type: audit
+      audit:
+        sources:
+          - kubeAPI       # Kubernetes API server audit logs
+          - openshiftAPI  # OpenShift API audit logs
+          - auditd        # Linux audit daemon logs
+    - name: applications
+      type: application
+      application: {}   # Logs from all application containers (includes HAProxy from openshift-ingress)
+    - name: infrastructure
+      type: infrastructure
+      infrastructure: {}  # Logs from nodes and system components
+  
+  managementState: Managed
+  
+  outputs: # Define log destinations - HTTP endpoint for centralized logging
+    - name: http-output
+      type: http
+      http:
+        url: "{{ log_forwarding_url }}"
+        method: POST
+        timeout: 60
+        headers:
+          Content-Type: "application/json"
+          X-Log-Source: "openshift-cluster"
+        batch:
+          maxBytes: 102400      # 512KB batch size
+          maxRecords: 1000      # Max 1000 records per batch
+          timeoutSecs: 5        # Send batch every 3 seconds
+  pipelines:  # Define log processing flows: input → filters → output
+    # Application logs: User workload logs from non-system namespaces
+    # Includes HAProxy access logs from openshift-ingress (explicitly allowed)
+    # Filters applied: multiline detection, system namespace drop, low-level drop, probe exclusion
+    - name: app-pipeline
+      inputRefs: [applications]
+      filterRefs: [enablemultiline, drop-system-namespaces, drop-lowlevel, drop-probes-regex]
+      outputRefs: [http-output]
+    
+    # Infrastructure logs: Node and system component logs
+    # Filters applied: low-level drop, probe exclusion
+    # CHANGED: Removed filter-infra-logs to allow all infrastructure logs
+    - name: infra-pipeline
+      inputRefs: [infrastructure]
+      filterRefs: [drop-lowlevel, drop-probes-regex]
+      outputRefs: [http-output]
+    
+    # Audit logs: Kubernetes and OpenShift API audit trail
+    # Filters applied: audit-specific filtering to reduce volume
+    - name: audit-pipeline
+      inputRefs: [audit]
+      filterRefs: [drop-ocp-audit]
+      outputRefs: [http-output]

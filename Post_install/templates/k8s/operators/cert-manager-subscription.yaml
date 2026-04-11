@@ -1,0 +1,11 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: cert-manager-operator-sub
+  namespace: cert-manager-operator
+spec:
+  channel: stable-v1         # or choose stable-v1.y or tech-preview depending on your version. :contentReference[oaicite:2]{index=2}
+  name: openshift-cert-manager-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic

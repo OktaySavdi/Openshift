@@ -1,0 +1,28 @@
+kind: LDAPSyncConfig
+apiVersion: v1
+url: "{{ ldap_sync_server_url }}"
+bindDN: "{{ ldap_bind_dn }}"
+bindPassword: "{{ ldap_password }}"
+ca: "{{ ldap_sync_ca_bundle }}"
+#groupUIDNameMapping:
+#  "CN=OpenShift_Users,OU=ApplicationGroups,OU=_Datacenter_,DC=example,DC=com": groups
+insecure: false
+rfc2307:
+    groupsQuery:
+        baseDN: "{{ ldap_sync_groups_base_dn }}"
+        scope: sub
+        derefAliases: never
+        filter: "{{ ldap_sync_filter }}"
+        pageSize: 0
+    groupUIDAttribute: "{{ ldap_sync_group_uid_attribute }}"
+    groupNameAttributes: {{ ldap_sync_group_name_attributes | to_json }}
+    groupMembershipAttributes: {{ ldap_sync_group_membership_attributes | to_json }}
+    usersQuery:
+        baseDN: "{{ ldap_sync_users_base_dn }}"
+        scope: sub
+        derefAliases: never
+        pageSize: 0
+    userUIDAttribute: "{{ ldap_sync_user_uid_attribute }}"
+    userNameAttributes: {{ ldap_sync_user_name_attributes | to_json }}
+    tolerateMemberNotFoundErrors: false
+    tolerateMemberOutOfScopeErrors: false

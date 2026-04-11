@@ -1,0 +1,23 @@
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: {{ kdump_role }}
+  name: 99-{{ kdump_role }}-kdump
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+        - path: /etc/kdump.conf
+          mode: 0644
+          overwrite: true
+          contents:
+            source: data:text/plain;charset=utf-8;base64,{{ kdump_conf_content | b64encode }}
+    systemd:
+      units:
+        - name: kdump.service
+          enabled: true
+  kernelArguments:
+    - crashkernel={{ kdump_crash_kernel_memory }}

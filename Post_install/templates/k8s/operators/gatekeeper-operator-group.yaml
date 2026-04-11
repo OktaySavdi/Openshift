@@ -1,0 +1,7 @@
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: gatekeeper-operator
+  namespace: openshift-gatekeeper-system
+spec: {}
+  # Empty spec = AllNamespaces mode (required for Gatekeeper to watch cluster-wide)

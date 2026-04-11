@@ -1,0 +1,17 @@
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: worker
+  name: 50-worker-chrony
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+      - path: /etc/chrony.conf
+        mode: 0644
+        overwrite: true
+        contents:
+          source: "data:,{{ lookup('template', playbook_dir + '/../templates/configs/machine-configs/chrony.conf.j2') | urlencode }}"

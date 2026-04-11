@@ -1,0 +1,622 @@
+---
+# ServiceAccount for cluster intelligence
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-intelligence-sa
+  namespace: gt-operators
+
+---
+# ClusterRole with permissions to read cluster state and metrics
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-intelligence-role
+rules:
+  # Permission to read all resources for analysis
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "events", "namespaces", "persistentvolumes", "persistentvolumeclaims"]
+    verbs: ["list", "get", "watch"]
+  # Permission to read metrics
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["list", "get"]
+  # Permission to read deployments and statefulsets
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["list", "get"]
+  # Permission to read HPA for scaling analysis
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["list", "get"]
+  # Permission to read storage classes
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["list", "get"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-intelligence-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-intelligence-role
+subjects:
+  - kind: ServiceAccount
+    name: cluster-intelligence-sa
+    namespace: gt-operators
+
+---
+# Secret for Teams webhook and ServiceNow integration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: intelligence-webhooks
+  namespace: gt-operators
+type: Opaque
+stringData:
+  TEAMS_WEBHOOK_URL: "{{ vault_teams_webhook_url }}"
+  SERVICENOW_INSTANCE: "{{ servicenow_instance }}"
+  SERVICENOW_USER: "{{ servicenow_user }}"
+  SERVICENOW_PASS: "{{ servicenow_password }}"
+
+---
+# ConfigMap for dynamic configuration (thresholds, baselines, ServiceNow settings)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-intelligence-config
+  namespace: gt-operators
+data:
+  # AI/ML Detection Thresholds
+  NODE_CPU_SPIKE_THRESHOLD: "85"
+  NODE_MEMORY_SPIKE_THRESHOLD: "85"
+  DISK_PRESSURE_THRESHOLD: "90"
+  POD_RESTART_ANOMALY: "5"
+  EVICTION_ANOMALY_COUNT: "3"
+  
+  # Historical Baselines (update based on your cluster's normal patterns)
+  BASELINE_CPU_AVG: "45"
+  BASELINE_MEMORY_AVG: "60"
+  SPIKE_DETECTION_THRESHOLD: "30"
+  
+  # ServiceNow Configuration
+  SERVICENOW_ASSIGNMENT_GROUP: "{{ servicenow_assignment_group }}"
+  SERVICENOW_CATEGORY: "Kubernetes"
+  SERVICENOW_SUBCATEGORY: "Cluster Health"
+  SERVICENOW_CALLER_ID: "cluster-intelligence-operator"
+  SERVICENOW_CONTACT_TYPE: "Monitoring"
+  
+  # ServiceNow Priority Thresholds
+  PRIORITY_CRITICAL_THRESHOLD: "5"    # ≥5 anomalies = P1
+  PRIORITY_HIGH_THRESHOLD: "3"        # ≥3 anomalies = P2
+  # <3 anomalies = P3
+  
+  # Duplicate Detection
+  DUPLICATE_DETECTION_HOURS: "6"      # Check last 6 hours for existing tickets
+  
+  # Feature Flags
+  ENABLE_SERVICENOW: "true"           # Set to "false" to disable ServiceNow integration
+  ENABLE_TEAMS_ALERTS: "true"         # Set to "false" to disable Teams alerts
+  ENABLE_PREDICTIONS: "true"          # Set to "false" to disable AI predictions
+
+---
+# ConfigMap containing the AI-powered analysis script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-intelligence-script
+  namespace: gt-operators
+data:
+  analyze.sh: |
+    #!/bin/bash
+    # ============================================================
+    # Cluster Intelligence Operator
+    # Purpose: AI/ML-powered cluster analysis and anomaly detection
+    # ============================================================
+    
+    set -e
+    
+    echo "=========================================="
+    echo "Cluster Intelligence Analysis Starting"
+    echo "Time: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "=========================================="
+    
+    # Load configuration from environment variables (populated from ConfigMap)
+    CLUSTER_NAME="${CLUSTER_NAME:-kubernetes-cluster}"
+    WEBHOOK_URL="${TEAMS_WEBHOOK_URL}"
+    SERVICENOW_INSTANCE="${SERVICENOW_INSTANCE}"
+    SERVICENOW_USER="${SERVICENOW_USER}"
+    SERVICENOW_PASS="${SERVICENOW_PASS}"
+    
+    # AI/ML Thresholds (from ConfigMap)
+    NODE_CPU_SPIKE_THRESHOLD="${NODE_CPU_SPIKE_THRESHOLD:-85}"
+    NODE_MEMORY_SPIKE_THRESHOLD="${NODE_MEMORY_SPIKE_THRESHOLD:-85}"
+    DISK_PRESSURE_THRESHOLD="${DISK_PRESSURE_THRESHOLD:-90}"
+    POD_RESTART_ANOMALY="${POD_RESTART_ANOMALY:-5}"
+    EVICTION_ANOMALY_COUNT="${EVICTION_ANOMALY_COUNT:-3}"
+    
+    # Historical Baselines (from ConfigMap)
+    BASELINE_CPU_AVG="${BASELINE_CPU_AVG:-45}"
+    BASELINE_MEMORY_AVG="${BASELINE_MEMORY_AVG:-60}"
+    SPIKE_DETECTION_THRESHOLD="${SPIKE_DETECTION_THRESHOLD:-30}"
+    
+    # ServiceNow Configuration (from ConfigMap)
+    SERVICENOW_ASSIGNMENT_GROUP="${SERVICENOW_ASSIGNMENT_GROUP:-Platform Engineering}"
+    SERVICENOW_CATEGORY="${SERVICENOW_CATEGORY:-Kubernetes}"
+    SERVICENOW_SUBCATEGORY="${SERVICENOW_SUBCATEGORY:-Cluster Health}"
+    SERVICENOW_CALLER_ID="${SERVICENOW_CALLER_ID:-cluster-intelligence-operator}"
+    SERVICENOW_CONTACT_TYPE="${SERVICENOW_CONTACT_TYPE:-Monitoring}"
+    
+    # Priority Thresholds (from ConfigMap)
+    PRIORITY_CRITICAL_THRESHOLD="${PRIORITY_CRITICAL_THRESHOLD:-5}"
+    PRIORITY_HIGH_THRESHOLD="${PRIORITY_HIGH_THRESHOLD:-3}"
+    
+    # Duplicate Detection (from ConfigMap)
+    DUPLICATE_DETECTION_HOURS="${DUPLICATE_DETECTION_HOURS:-6}"
+    
+    # Feature Flags (from ConfigMap)
+    ENABLE_SERVICENOW="${ENABLE_SERVICENOW:-true}"
+    ENABLE_TEAMS_ALERTS="${ENABLE_TEAMS_ALERTS:-true}"
+    ENABLE_PREDICTIONS="${ENABLE_PREDICTIONS:-true}"
+    
+    echo "📊 Configuration Loaded:"
+    echo "  Cluster: $CLUSTER_NAME"
+    echo "  CPU Spike Threshold: ${NODE_CPU_SPIKE_THRESHOLD}%"
+    echo "  Memory Spike Threshold: ${NODE_MEMORY_SPIKE_THRESHOLD}%"
+    echo "  ServiceNow: $ENABLE_SERVICENOW"
+    echo "  Teams Alerts: $ENABLE_TEAMS_ALERTS"
+    echo ""
+    
+    # Temp files for analysis
+    ANOMALIES_REPORT="/tmp/anomalies_$$.txt"
+    PREDICTIONS_REPORT="/tmp/predictions_$$.txt"
+    EVENTS_REPORT="/tmp/events_$$.txt"
+    RECOMMENDATIONS_REPORT="/tmp/recommendations_$$.txt"
+    > "$ANOMALIES_REPORT"
+    > "$PREDICTIONS_REPORT"
+    > "$EVENTS_REPORT"
+    > "$RECOMMENDATIONS_REPORT"
+    
+    # Counters
+    TOTAL_ANOMALIES=0
+    CRITICAL_ANOMALIES=0
+    WARNING_ANOMALIES=0
+    PREDICTIONS_MADE=0
+    
+    # Function to send Teams notification
+    send_teams_alert() {
+      local title="$1"
+      local message="$2"
+      local color="$3"
+      
+      [ "$ENABLE_TEAMS_ALERTS" != "true" ] && return 0
+      [ -z "$WEBHOOK_URL" ] && return 1
+      
+      local payload=$(cat <<EOF
+    {
+      "@type": "MessageCard",
+      "@context": "https://schema.org/extensions",
+      "summary": "$title",
+      "themeColor": "$color",
+      "title": "$title",
+      "sections": [{
+        "activityTitle": "Cluster Intelligence Alert",
+        "activitySubtitle": "$(date '+%Y-%m-%d %H:%M:%S UTC')",
+        "facts": [{"name": "Cluster:", "value": "$CLUSTER_NAME"}],
+        "text": "$message",
+        "markdown": true
+      }]
+    }
+    EOF
+    )
+      
+      RESPONSE=$(curl -s -w "\n%{http_code}" -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL" 2>&1)
+      HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+      [ "$HTTP_CODE" == "200" ] && echo "  ✅ Teams notification sent"
+    }
+    
+    # Function: ServiceNow API (create, check, update)
+    servicenow_api() {
+      [ "$ENABLE_SERVICENOW" != "true" ] && return 1
+      [ -z "$SERVICENOW_INSTANCE" ] || [ "$SERVICENOW_INSTANCE" == "your-instance.service-now.com" ] && return 1
+      
+      local action="$1"
+      local desc=$(printf '%s' "$2" | sed 's/"/\\"/g' | tr '\n' ' ')
+      local sys_id="$3"
+      
+      if [ "$action" == "create" ]; then
+        # Build comprehensive description with anomalies and predictions
+        local full_desc="${desc}"
+        [ -f "$ANOMALIES_REPORT" ] && [ -s "$ANOMALIES_REPORT" ] && full_desc="${full_desc}\\n\\nCRITICAL ISSUES:\\n$(grep '^CRITICAL' "$ANOMALIES_REPORT" | while IFS='|' read -r sev type resource details action; do echo "- ${type}: ${resource} - ${details}\\n"; done)"
+        [ -f "$PREDICTIONS_REPORT" ] && [ -s "$PREDICTIONS_REPORT" ] && full_desc="${full_desc}\\n\\nAI PREDICTIONS:\\n$(cat "$PREDICTIONS_REPORT" | sed 's/^/- /g' | tr '\n' ' ')"
+        [ -f "$RECOMMENDATIONS_REPORT" ] && [ -s "$RECOMMENDATIONS_REPORT" ] && full_desc="${full_desc}\\n\\nRECOMMENDATIONS:\\n$(cat "$RECOMMENDATIONS_REPORT" | tr '\n' ' ')"
+        full_desc="${full_desc}\\n\\nCluster: ${CLUSTER_NAME}\\nTime: $(date)\\nAnomalies: ${TOTAL_ANOMALIES} (Critical: ${CRITICAL_ANOMALIES}, Warning: ${WARNING_ANOMALIES})"
+        full_desc=$(printf '%s' "$full_desc" | sed 's/"/\\"/g' | tr '\n' ' ')
+        
+        # Determine priority based on anomaly count
+        local priority="3"
+        [ "$CRITICAL_ANOMALIES" -ge "$PRIORITY_CRITICAL_THRESHOLD" ] && priority="1"
+        [ "$CRITICAL_ANOMALIES" -ge "$PRIORITY_HIGH_THRESHOLD" ] && [ "$priority" != "1" ] && priority="2"
+        
+        local payload="{\"short_description\":\"CRITICAL: Cluster Anomalies - ${CLUSTER_NAME}\",\"description\":\"${full_desc}\",\"urgency\":\"1\",\"impact\":\"1\",\"priority\":\"${priority}\",\"assignment_group\":\"$SERVICENOW_ASSIGNMENT_GROUP\",\"category\":\"$SERVICENOW_CATEGORY\",\"subcategory\":\"$SERVICENOW_SUBCATEGORY\",\"u_cluster_name\":\"$CLUSTER_NAME\",\"state\":\"1\"}"
+        local resp=$(curl -s -w "\n%{http_code}" -u "$SERVICENOW_USER:$SERVICENOW_PASS" -H "Content-Type: application/json" -d "$payload" "https://$SERVICENOW_INSTANCE/api/now/table/incident" 2>&1)
+        local code=$(echo "$resp" | tail -n1)
+        if [ "$code" == "201" ]; then
+          local ticket=$(echo "$resp" | head -n -1 | grep -o '"number":"[^"]*' | cut -d'"' -f4)
+          local sys_id=$(echo "$resp" | head -n -1 | grep -o '"sys_id":"[^"]*' | cut -d'"' -f4)
+          echo "$ticket|$sys_id" > /tmp/snow_ticket_info.txt
+          echo "$ticket"
+          return 0
+        fi
+        
+      elif [ "$action" == "check" ]; then
+        local ts=$(date -u -d "${DUPLICATE_DETECTION_HOURS:-6} hours ago" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -v-${DUPLICATE_DETECTION_HOURS:-6}H '+%Y-%m-%d %H:%M:%S')
+        local resp=$(curl -s -w "\n%{http_code}" -u "$SERVICENOW_USER:$SERVICENOW_PASS" "https://$SERVICENOW_INSTANCE/api/now/table/incident?sysparm_query=u_cluster_name=${CLUSTER_NAME}^stateIN1,2,3^sys_created_on>=${ts}&sysparm_limit=1" 2>&1)
+        local code=$(echo "$resp" | tail -n1)
+        if [ "$code" == "200" ]; then
+          local ticket=$(echo "$resp" | head -n -1 | grep -o '"number":"[^"]*' | head -1 | cut -d'"' -f4)
+          if [ -n "$ticket" ]; then
+            local sys_id=$(echo "$resp" | head -n -1 | grep -o '"sys_id":"[^"]*' | head -1 | cut -d'"' -f4)
+            echo "$ticket|$sys_id" > /tmp/snow_existing_ticket.txt
+            echo "$ticket"
+            return 0
+          fi
+        fi
+        
+      elif [ "$action" == "update" ]; then
+        [ -z "$sys_id" ] && return 1
+        local payload="{\"work_notes\":\"${desc}\"}"
+        curl -s -u "$SERVICENOW_USER:$SERVICENOW_PASS" -H "Content-Type: application/json" -X PATCH -d "$payload" "https://$SERVICENOW_INSTANCE/api/now/table/incident/$sys_id" >/dev/null && return 0
+      fi
+      return 1
+    }
+    
+    # Function: Analyze Node Pressure and Predict Failures
+    analyze_node_health() {
+      echo ""
+      echo "=== Analyzing Node Health & Predicting Failures ==="
+      
+      NODES=$(kubectl get nodes -o json)
+      
+      echo "$NODES" | jq -r '.items[] | .metadata.name' | while read -r NODE; do
+        echo "  🔍 Analyzing node: $NODE"
+        
+        # Get node conditions
+        CONDITIONS=$(echo "$NODES" | jq -r --arg node "$NODE" '.items[] | select(.metadata.name == $node) | .status.conditions')
+        
+        # Check for pressure conditions
+        MEMORY_PRESSURE=$(echo "$CONDITIONS" | jq -r '.[] | select(.type == "MemoryPressure") | .status')
+        DISK_PRESSURE=$(echo "$CONDITIONS" | jq -r '.[] | select(.type == "DiskPressure") | .status')
+        PID_PRESSURE=$(echo "$CONDITIONS" | jq -r '.[] | select(.type == "PIDPressure") | .status')
+        
+        # Get node metrics
+        NODE_METRICS=$(kubectl top node "$NODE" 2>/dev/null || echo "")
+        
+        if [ -n "$NODE_METRICS" ]; then
+          # Extract CPU and Memory percentages (column 3 and 5 contain the percentages)
+          CPU_USAGE=$(echo "$NODE_METRICS" | tail -1 | awk '{print $3}' | sed 's/%//')
+          MEMORY_USAGE=$(echo "$NODE_METRICS" | tail -1 | awk '{print $5}' | sed 's/%//')
+          
+          # Skip if values are empty or non-numeric
+          if [ -z "$CPU_USAGE" ] || [ -z "$MEMORY_USAGE" ]; then
+            echo "    ℹ️  Metrics not available for $NODE"
+            continue
+          fi
+          
+          # AI Logic: Detect CPU spike anomaly
+          if [ "$CPU_USAGE" -gt "$NODE_CPU_SPIKE_THRESHOLD" ]; then
+            SPIKE_DIFF=$((CPU_USAGE - BASELINE_CPU_AVG))
+            if [ "$SPIKE_DIFF" -gt "$SPIKE_DETECTION_THRESHOLD" ]; then
+              echo "    🚨 ANOMALY: CPU spike detected on $NODE: ${CPU_USAGE}% (baseline: ${BASELINE_CPU_AVG}%)"
+              echo "CRITICAL|Node CPU Spike|$NODE|CPU: ${CPU_USAGE}%|Spike of ${SPIKE_DIFF}% from baseline" >> "$ANOMALIES_REPORT"
+              CRITICAL_ANOMALIES=$((CRITICAL_ANOMALIES + 1))
+              
+              # Prediction: Node may become unresponsive
+              echo "    🔮 PREDICTION: Node $NODE may experience performance degradation if CPU remains high" >> "$PREDICTIONS_REPORT"
+              PREDICTIONS_MADE=$((PREDICTIONS_MADE + 1))
+            fi
+          fi
+          
+          # AI Logic: Detect memory spike anomaly
+          if [ "$MEMORY_USAGE" -gt "$NODE_MEMORY_SPIKE_THRESHOLD" ]; then
+            SPIKE_DIFF=$((MEMORY_USAGE - BASELINE_MEMORY_AVG))
+            if [ "$SPIKE_DIFF" -gt "$SPIKE_DETECTION_THRESHOLD" ]; then
+              echo "    🚨 ANOMALY: Memory spike detected on $NODE: ${MEMORY_USAGE}% (baseline: ${BASELINE_MEMORY_AVG}%)"
+              echo "CRITICAL|Node Memory Spike|$NODE|Memory: ${MEMORY_USAGE}%|Spike of ${SPIKE_DIFF}% from baseline" >> "$ANOMALIES_REPORT"
+              CRITICAL_ANOMALIES=$((CRITICAL_ANOMALIES + 1))
+              
+              # Prediction: OOM kills likely
+              echo "    🔮 PREDICTION: Node $NODE at risk of OOM kills - pods may be evicted" >> "$PREDICTIONS_REPORT"
+              PREDICTIONS_MADE=$((PREDICTIONS_MADE + 1))
+            fi
+          fi
+        fi
+        
+        # Check for pressure conditions
+        if [ "$MEMORY_PRESSURE" == "True" ]; then
+          echo "    ⚠️  WARNING: Memory pressure detected on $NODE"
+          echo "WARNING|Memory Pressure|$NODE|Memory pressure active|Pods at risk of eviction" >> "$ANOMALIES_REPORT"
+          WARNING_ANOMALIES=$((WARNING_ANOMALIES + 1))
+        fi
+        
+        if [ "$DISK_PRESSURE" == "True" ]; then
+          echo "    🚨 CRITICAL: Disk pressure detected on $NODE"
+          echo "CRITICAL|Disk Pressure|$NODE|Disk pressure active|Node may become unschedulable" >> "$ANOMALIES_REPORT"
+          CRITICAL_ANOMALIES=$((CRITICAL_ANOMALIES + 1))
+          
+          # Prediction: Disk failure imminent
+          echo "    🔮 PREDICTION: Disk failure risk on $NODE - consider draining and replacing node" >> "$PREDICTIONS_REPORT"
+          PREDICTIONS_MADE=$((PREDICTIONS_MADE + 1))
+        fi
+        
+        if [ "$PID_PRESSURE" == "True" ]; then
+          echo "    ⚠️  WARNING: PID pressure detected on $NODE"
+          echo "WARNING|PID Pressure|$NODE|Too many processes|May reject new pods" >> "$ANOMALIES_REPORT"
+          WARNING_ANOMALIES=$((WARNING_ANOMALIES + 1))
+        fi
+      done
+      
+      TOTAL_ANOMALIES=$((CRITICAL_ANOMALIES + WARNING_ANOMALIES))
+    }
+    
+    # Function: Analyze Pod Anomalies and Restart Patterns
+    analyze_pod_anomalies() {
+      echo ""
+      echo "=== Analyzing Pod Restart Patterns & Anomalies ==="
+      
+      # Get all pods with restart counts
+      PODS=$(kubectl get pods -A -o json)
+      
+      echo "$PODS" | jq -r '.items[] | "\(.metadata.namespace)|\(.metadata.name)|\(.status.containerStatuses[0].restartCount // 0)"' | while IFS='|' read -r namespace pod restarts; do
+        if [ "$restarts" -gt "$POD_RESTART_ANOMALY" ]; then
+          echo "  🚨 ANOMALY: Excessive restarts detected: $namespace/$pod (${restarts} restarts)"
+          echo "WARNING|Pod Restart Anomaly|$namespace/$pod|Restarts: ${restarts}|Possible CrashLoopBackOff or OOM" >> "$ANOMALIES_REPORT"
+          WARNING_ANOMALIES=$((WARNING_ANOMALIES + 1))
+          
+          # AI Prediction: Check if OOM or CrashLoop
+          POD_STATUS=$(echo "$PODS" | jq -r --arg ns "$namespace" --arg pod "$pod" '.items[] | select(.metadata.namespace == $ns and .metadata.name == $pod) | .status.containerStatuses[0].state')
+          
+          if echo "$POD_STATUS" | grep -q "OOMKilled"; then
+            echo "    🔮 PREDICTION: $namespace/$pod experiencing OOM kills - increase memory limits" >> "$PREDICTIONS_REPORT"
+            echo "    📋 RECOMMENDATION: Increase memory limit for $namespace/$pod" >> "$RECOMMENDATIONS_REPORT"
+            PREDICTIONS_MADE=$((PREDICTIONS_MADE + 1))
+          fi
+        fi
+      done
+    }
+    
+    # Function: Analyze Kubernetes Events for Anomalies
+    analyze_cluster_events() {
+      echo ""
+      echo "=== Analyzing Cluster Events for Anomalies ==="
+      
+      # Get recent events (last 30 minutes)
+      EVENTS=$(kubectl get events -A --sort-by='.lastTimestamp' -o json)
+      
+      # Count eviction events
+      EVICTION_COUNT=$(echo "$EVENTS" | jq '[.items[] | select(.reason == "Evicted")] | length')
+      
+      if [ "$EVICTION_COUNT" -gt "$EVICTION_ANOMALY_COUNT" ]; then
+        echo "  🚨 ANOMALY: High pod eviction rate detected: $EVICTION_COUNT evictions"
+        echo "CRITICAL|High Eviction Rate|Cluster-wide|Evictions: ${EVICTION_COUNT}|Resource pressure or node issues" >> "$ANOMALIES_REPORT"
+        CRITICAL_ANOMALIES=$((CRITICAL_ANOMALIES + 1))
+        
+        # Prediction: Cluster resource exhaustion
+        echo "    🔮 PREDICTION: Cluster experiencing resource exhaustion - consider scaling up nodes" >> "$PREDICTIONS_REPORT"
+        echo "    📋 RECOMMENDATION: Add more worker nodes or scale down workloads" >> "$RECOMMENDATIONS_REPORT"
+        PREDICTIONS_MADE=$((PREDICTIONS_MADE + 1))
+      fi
+      
+      # Check for ImagePullBackOff events
+      IMAGE_PULL_ERRORS=$(echo "$EVENTS" | jq '[.items[] | select(.reason == "Failed" or .reason == "BackOff")] | length')
+      
+      if [ "$IMAGE_PULL_ERRORS" -gt 5 ]; then
+        echo "  ⚠️  WARNING: Multiple image pull failures detected: $IMAGE_PULL_ERRORS"
+        echo "WARNING|Image Pull Failures|Cluster-wide|Failures: ${IMAGE_PULL_ERRORS}|Registry connectivity or auth issues" >> "$ANOMALIES_REPORT"
+        WARNING_ANOMALIES=$((WARNING_ANOMALIES + 1))
+      fi
+      
+      # Check for FailedScheduling events
+      SCHEDULING_FAILURES=$(echo "$EVENTS" | jq '[.items[] | select(.reason == "FailedScheduling")] | length')
+      
+      if [ "$SCHEDULING_FAILURES" -gt 5 ]; then
+        echo "  ⚠️  WARNING: Multiple scheduling failures detected: $SCHEDULING_FAILURES"
+        echo "WARNING|Scheduling Failures|Cluster-wide|Failures: ${SCHEDULING_FAILURES}|Insufficient resources or taints" >> "$ANOMALIES_REPORT"
+        WARNING_ANOMALIES=$((WARNING_ANOMALIES + 1))
+        
+        # Prediction: Capacity planning needed
+        echo "    🔮 PREDICTION: Cluster capacity insufficient - workloads cannot be scheduled" >> "$PREDICTIONS_REPORT"
+        echo "    📋 RECOMMENDATION: Review node capacity and add resources" >> "$RECOMMENDATIONS_REPORT"
+        PREDICTIONS_MADE=$((PREDICTIONS_MADE + 1))
+      fi
+    }
+    
+    # Function: Analyze Persistent Volume Health
+    analyze_storage_health() {
+      echo ""
+      echo "=== Analyzing Storage & PVC Health ==="
+      
+      # Get all PVCs
+      PVCS=$(kubectl get pvc -A -o json)
+      
+      # Check for pending PVCs
+      PENDING_PVCS=$(echo "$PVCS" | jq '[.items[] | select(.status.phase == "Pending")] | length')
+      
+      if [ "$PENDING_PVCS" -gt 0 ]; then
+        echo "  ⚠️  WARNING: $PENDING_PVCS PVCs in Pending state"
+        echo "WARNING|Pending PVCs|Cluster-wide|Count: ${PENDING_PVCS}|Storage provisioning issues" >> "$ANOMALIES_REPORT"
+        WARNING_ANOMALIES=$((WARNING_ANOMALIES + 1))
+        
+        # Prediction: Storage backend issues
+        echo "    🔮 PREDICTION: Storage provisioner may be experiencing issues" >> "$PREDICTIONS_REPORT"
+        PREDICTIONS_MADE=$((PREDICTIONS_MADE + 1))
+      fi
+    }
+    
+    # Main Analysis Flow
+    analyze_node_health
+    analyze_pod_anomalies
+    analyze_cluster_events
+    analyze_storage_health
+    
+    echo ""
+    echo "=========================================="
+    echo "Cluster Intelligence Analysis Complete"
+    echo "=========================================="
+    echo ""
+    echo "=== Summary ==="
+    echo "Total Anomalies Detected: $TOTAL_ANOMALIES"
+    echo "  - Critical: $CRITICAL_ANOMALIES"
+    echo "  - Warning: $WARNING_ANOMALIES"
+    echo "Predictions Made: $PREDICTIONS_MADE"
+    echo ""
+    
+    # Display anomalies
+    if [ -s "$ANOMALIES_REPORT" ]; then
+      echo "=== Detected Anomalies ==="
+      cat "$ANOMALIES_REPORT" | while IFS='|' read -r severity type resource details action; do
+        if [ "$severity" == "CRITICAL" ]; then
+          echo "🔴 CRITICAL: $type"
+        else
+          echo "🟠 WARNING: $type"
+        fi
+        echo "   Resource: $resource"
+        echo "   Details: $details"
+        echo "   Impact: $action"
+        echo ""
+      done
+    fi
+    
+    # Display predictions
+    if [ -s "$PREDICTIONS_REPORT" ]; then
+      echo "=== AI Predictions ==="
+      cat "$PREDICTIONS_REPORT"
+      echo ""
+    fi
+    
+    # Display recommendations
+    if [ -s "$RECOMMENDATIONS_REPORT" ]; then
+      echo "=== Recommended Actions ==="
+      cat "$RECOMMENDATIONS_REPORT"
+      echo ""
+    fi
+    
+    # Send alerts and create tickets for critical anomalies
+    if [ "$CRITICAL_ANOMALIES" -gt 0 ]; then
+      echo "🚨 CRITICAL ANOMALIES DETECTED - Creating ServiceNow Ticket"
+      
+      # Build comprehensive alert message
+      ALERT_MSG="🤖 **Cluster Intelligence - Critical Alert**  \\n\\n"
+      ALERT_MSG="${ALERT_MSG}**Cluster:** \`$CLUSTER_NAME\`  \\n"
+      ALERT_MSG="${ALERT_MSG}**Summary:** 🔴 Critical: **$CRITICAL_ANOMALIES** | 🟠 Warning: $WARNING_ANOMALIES | 🔮 Predictions: $PREDICTIONS_MADE  \\n\\n"
+      ALERT_MSG="${ALERT_MSG}**Top Critical Issues:**  \\n$(grep '^CRITICAL' "$ANOMALIES_REPORT" | head -3 | while IFS='|' read -r sev type resource details action; do echo "- **$type**: \`$resource\` - $details  \\n"; done)"
+      [ "$PREDICTIONS_MADE" -gt 0 ] && ALERT_MSG="${ALERT_MSG}\\n**🔮 AI Predictions:**  \\n$(head -3 "$PREDICTIONS_REPORT" | sed 's/^/- /g' | tr '\n' ' ')  \\n"
+      
+      # Check for existing ticket (avoid duplicates)
+      TICKET=$(servicenow_api "check")
+      
+      if [ -n "$TICKET" ] && [ -f /tmp/snow_existing_ticket.txt ]; then
+        # Update existing ticket
+        SYS_ID=$(cat /tmp/snow_existing_ticket.txt | cut -d'|' -f2)
+        WORK_NOTE="CLUSTER INTELLIGENCE UPDATE - $(date)\\nNew Analysis: Critical: ${CRITICAL_ANOMALIES}, Warning: ${WARNING_ANOMALIES}, Predictions: ${PREDICTIONS_MADE}\\n\\nRecent Anomalies:\\n$(grep '^CRITICAL' "$ANOMALIES_REPORT" | head -5 | while IFS='|' read -r sev type resource details action; do echo "- ${type}: ${resource} - ${details}\\n"; done)"
+        servicenow_api "update" "$WORK_NOTE" "$SYS_ID"
+        ALERT_MSG="${ALERT_MSG}\\n\\n📋 **ServiceNow Ticket:** $TICKET (updated)"
+      else
+        # Create new ticket
+        TICKET_DESC="Cluster Intelligence AI detected $CRITICAL_ANOMALIES critical anomalies in ${CLUSTER_NAME}. Total Anomalies: ${TOTAL_ANOMALIES} (Critical: ${CRITICAL_ANOMALIES}, Warning: ${WARNING_ANOMALIES}). AI Predictions: ${PREDICTIONS_MADE}."
+        TICKET=$(servicenow_api "create" "$TICKET_DESC")
+        [ -n "$TICKET" ] && ALERT_MSG="${ALERT_MSG}\\n\\n📋 **ServiceNow Ticket:** $TICKET"
+      fi
+      
+      send_teams_alert "🚨 CRITICAL: Cluster Intelligence Alert - $CLUSTER_NAME" "$ALERT_MSG" "FF0000"
+      
+    elif [ "$WARNING_ANOMALIES" -gt 0 ]; then
+      echo "⚠️  WARNING ANOMALIES DETECTED - Sending Teams notification"
+      
+      ALERT_MSG="🤖 **Cluster Intelligence - Warning Report**  \\n\\n"
+      ALERT_MSG="${ALERT_MSG}**Cluster:** \`$CLUSTER_NAME\`  \\n"
+      ALERT_MSG="${ALERT_MSG}**Summary:** 🟠 Warning: $WARNING_ANOMALIES | 🔮 Predictions: $PREDICTIONS_MADE  \\n\\n"
+      ALERT_MSG="${ALERT_MSG}**Issues:**  \\n$(head -5 "$ANOMALIES_REPORT" | while IFS='|' read -r sev type resource details action; do echo "- **$type**: \`$resource\` - $details  \\n"; done)"
+      [ "$PREDICTIONS_MADE" -gt 0 ] && ALERT_MSG="${ALERT_MSG}\\n**🔮 Predictions:**  \\n$(head -3 "$PREDICTIONS_REPORT" | sed 's/^/- /g' | tr '\n' ' ')  \\n"
+      
+      send_teams_alert "⚠️ Cluster Intelligence Warning - $CLUSTER_NAME" "$ALERT_MSG" "FFA500"
+      
+    else
+      echo "✅ No anomalies detected - cluster health is normal"
+    fi
+    
+    # Cleanup
+    rm -f "$ANOMALIES_REPORT" "$PREDICTIONS_REPORT" "$EVENTS_REPORT" "$RECOMMENDATIONS_REPORT" /tmp/snow_ticket_info.txt /tmp/snow_existing_ticket.txt
+    
+    exit 0
+
+---
+# CronJob to run cluster intelligence analysis
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cluster-intelligence
+  namespace: gt-operators
+spec:
+  # Run every 15 minutes for continuous monitoring
+  schedule: "*/15 * * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 3600  # Keep job for 1 hour
+      template:
+        metadata:
+          labels:
+            app: cluster-intelligence
+        spec:
+          serviceAccountName: cluster-intelligence-sa
+{% if enable_registry_secret | default(false) %}
+          imagePullSecrets:
+            - name: regcred
+{% endif %}
+          restartPolicy: OnFailure
+          containers:
+            - name: intelligence
+              image: bitnami/kubectl:latest
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/bash"]
+              args: ["/scripts/analyze.sh"]
+              env:
+                # Cluster name
+                - name: CLUSTER_NAME
+                  value: "gtocpmyntpoc01"
+              
+              # Load all secrets and configuration
+              envFrom:
+                - secretRef:
+                    name: intelligence-webhooks
+                - configMapRef:
+                    name: cluster-intelligence-config
+              volumeMounts:
+                - name: intelligence-script
+                  mountPath: /scripts
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                runAsUser: 1001
+                capabilities:
+                  drop:
+                    - ALL
+          volumes:
+            - name: intelligence-script
+              configMap:
+                name: cluster-intelligence-script
+                defaultMode: 0755

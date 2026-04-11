@@ -1,0 +1,19 @@
+---
+# CIS Benchmark Scan Settings
+apiVersion: compliance.openshift.io/v1alpha1
+kind: ScanSetting
+metadata:
+  name: cis-scan-setting
+  namespace: openshift-compliance
+spec:
+  autoApplyRemediations: {{ compliance_auto_apply_remediations | default(false) | lower }}
+  autoUpdateRemediations: {{ compliance_auto_update_remediations | default(true) | lower }}
+  schedule: "{{ cis_scan_schedule | default('0 2 * * 0') }}"
+  roles:
+    - worker
+    - master
+  scanTolerations:
+    - effect: NoSchedule
+      key: node-role.kubernetes.io/master
+      operator: Exists
+  showNotApplicable: false

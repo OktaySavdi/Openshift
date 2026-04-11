@@ -1,0 +1,36 @@
+# Chrony configuration for OpenShift nodes
+# Synchronized with {{ ntp_server_host }}
+
+# Drift file location
+driftfile /var/lib/chrony/drift
+
+# Allow large time steps on first three updates
+makestep 1.0 3
+
+# Enable kernel RTC synchronization
+rtcsync
+
+# Log directory
+logdir /var/log/chrony
+
+# Primary NTP server
+server {{ ntp_server_host }} iburst
+
+{% if ntp_fallback_servers is defined and ntp_fallback_servers | length > 0 %}
+# Fallback NTP servers
+{% for server in ntp_fallback_servers %}
+server {{ server }} iburst
+{% endfor %}
+{% endif %}
+
+# Maximum distance to stratum-1 source
+maxdistance 16.0
+
+# Minimum number of sources to be considered selectable
+minsources 1
+
+# Allow NTP client access from local network (optional)
+# allow 192.168.0.0/16
+
+# Serve time even if not synchronized to a time source
+local stratum 10

@@ -1,0 +1,27 @@
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: "registry-{{ cluster_name }}-pv"
+spec:
+  capacity:
+    storage: "{{ registry_storage_size }}"
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteMany
+  nfs:
+    path: "{{ registry_nfs_path }}"
+    server: "{{ nfs_server }}"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: "{{ registry_pvc_name }}"
+  namespace: openshift-image-registry
+spec:
+  accessModes:
+    - ReadWriteMany
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: "{{ registry_storage_size }}"

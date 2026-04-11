@@ -1,0 +1,50 @@
+apiVersion: charts.kubecost.com/v1alpha1
+kind: CostAnalyzer
+metadata:
+  name: kubecost-instance
+  namespace: kubecost
+spec:
+  # Prometheus integration - use OpenShift's Thanos Querier
+  prometheus:
+    external:
+      url: https://thanos-querier.openshift-monitoring.svc:9091
+    # Query service account for authentication
+    queryServiceAccountName: kubecost-prometheus
+  
+  # Disable Grafana
+  global:
+    grafana:
+      enabled: false
+      proxy: false
+  
+  # Kubecost model configuration
+  kubecostModel:
+    warmCache: true              # Pre-warm cache for faster queries
+    warmSavingsCache: true       # Pre-calculate savings recommendations
+    etl: true                    # Enable ETL for better performance
+    etlBucketConfigSecret: ""    # Optional: S3/Azure bucket for long-term storage
+    cloudIntegrationSecret: cloud-integration  # Azure billing integration
+    
+    # Custom pricing for on-premises (used when Azure billing unavailable)
+    costModel:
+      # CPU cost per core-hour (default: $0.031611)
+      cpuCost: "0.03"
+      # Memory cost per GB-hour (default: $0.004237)
+      memoryCost: "0.004"
+      # Storage cost per GB-month (default: $0.04)
+      storageClassPricing:
+        default: "0.04"
+        nfs: "0.02"
+        local: "0.01"
+  
+  # Disable default ingress (we'll create OpenShift Route instead)
+  ingress:
+    enabled: false
+  
+  # Enable network cost tracking (optional - requires network policy support)
+  networkCosts:
+    enabled: false
+  
+  # Disable ServiceMonitor (permission issues with operator)
+  serviceMonitor:
+    enabled: false

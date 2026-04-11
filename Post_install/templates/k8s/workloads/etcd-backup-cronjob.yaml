@@ -1,0 +1,471 @@
+# ServiceAccount: Identity for the backup pods
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: etcd-backup-sa
+  namespace: gt-operators
+---
+# ClusterRole: Permissions needed for the backup process
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: etcd-backup-role
+rules:
+  # Allow reading node information
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Allow reading pod information
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # Allow reading pod logs
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+# ClusterRoleBinding: Grant permissions to the ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: etcd-backup-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: etcd-backup-role
+subjects:
+  - kind: ServiceAccount
+    name: etcd-backup-sa
+    namespace: gt-operators
+---
+# ConfigMap: Configuration settings for etcd backup
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: etcd-backup-config
+  namespace: gt-operators
+data:
+  # Backup Configuration
+  BACKUP_DIR: "/opt/backup"
+  MAX_BACKUPS: "10"
+  CLUSTER_NAME: "stg-tkg-asm-elastic-test-01"  # Cluster name for notifications and ServiceNow
+  
+  # etcd Configuration
+  ETCD_ENDPOINT: "https://127.0.0.1:2379"
+  ETCD_CACERT: "/etc/kubernetes/pki/etcd/ca.crt"
+  ETCD_CERT: "/etc/kubernetes/pki/etcd/server.crt"
+  ETCD_KEY: "/etc/kubernetes/pki/etcd/server.key"
+  
+  # Tool Versions
+  ETCD_VERSION: "v3.5.15"
+  
+  # ServiceNow Configuration
+  SERVICENOW_ASSIGNMENT_GROUP: "{{ servicenow_assignment_group }}"
+  SERVICENOW_CATEGORY: "Kubernetes"
+  SERVICENOW_SUBCATEGORY: "etcd Backup"
+  SERVICENOW_CALLER_ID: "etcd-backup-operator"
+  SERVICENOW_CONTACT_TYPE: "Monitoring"
+  
+  # Feature Flags
+  ENABLE_SERVICENOW: "true"           # Set to "false" to disable ServiceNow integration
+  ENABLE_TEAMS_ALERTS: "true"         # Set to "false" to disable Teams alerts
+  ENABLE_SUCCESS_NOTIFICATIONS: "false"  # Set to "true" to get notifications on success
+---
+# ConfigMap: Contains the backup script that runs in the pod
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: etcd-backup-script
+  namespace: gt-operators
+data:
+  backup.sh: |
+    #!/bin/sh
+    set -e  # Exit immediately if any command fails
+    
+    # ===== INSTALL REQUIRED TOOLS =====
+    # Check and install curl (needed for Teams notifications)
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "Installing curl..."
+        apk add --no-cache curl
+    fi
+    
+    # Check and install jq (needed for JSON parsing in ServiceNow integration)
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "Installing jq..."
+        apk add --no-cache jq
+    fi
+    
+    # Check and install etcdctl (needed for etcd backup)
+    if ! command -v etcdctl >/dev/null 2>&1; then
+        echo "Installing etcdctl..."
+        ETCD_VER="${ETCD_VERSION:-v3.5.15}"  # etcd client version from config
+        DOWNLOAD_URL=https://github.com/etcd-io/etcd/releases/download
+        # Download etcd release package
+        wget -q ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -O /tmp/etcd.tar.gz
+        # Extract the archive
+        tar xzf /tmp/etcd.tar.gz -C /tmp
+        # Move only etcdctl binary to /usr/local/bin
+        mv /tmp/etcd-${ETCD_VER}-linux-amd64/etcdctl /usr/local/bin/
+        # Clean up temporary files
+        rm -rf /tmp/etcd*
+    fi
+    
+    # ===== CONFIGURATION =====
+    BACKUP_DIR="${BACKUP_DIR:-/opt/backup}"  # Directory where backups are stored
+    MAX_BACKUPS="${MAX_BACKUPS:-10}"  # Maximum number of backups to keep per node
+    TIMESTAMP=$(date +%Y%m%d-%H%M%S)  # Timestamp format: YYYYMMDD-HHMMSS
+    NODE_NAME=$(hostname)  # Get current node hostname (unique per control plane node)
+    BACKUP_FILE="etcd-backup-${NODE_NAME}-${TIMESTAMP}.tar.gz"  # Backup filename with node name
+    CLUSTER_NAME="${CLUSTER_NAME:-unknown-cluster}"  # Use CLUSTER_NAME from ConfigMap or default
+    
+    echo "Starting etcd backup at $(date)"
+    
+    # Create backup directory if it doesn't exist
+    mkdir -p "${BACKUP_DIR}"
+    
+    # ===== TEAMS NOTIFICATION FUNCTION =====
+    # Function to send notification to Microsoft Teams webhook
+    send_notification() {
+        local status=$1    # Status: SUCCESS or FAILED
+        local message=$2   # Detailed message to send
+        
+        # Check if Teams alerts are enabled
+        if [ "$ENABLE_TEAMS_ALERTS" != "true" ]; then
+            echo "  ℹ️  Teams alerts disabled via configuration"
+            return 0
+        fi
+        
+        # Only send notification if webhook URL is configured
+        if [ -n "${TEAMS_WEBHOOK_URL}" ]; then
+            # Set color and emoji based on status
+            local color="FF0000"  # Red for failed
+            local emoji="❌"
+            
+            if [ "${status}" = "SUCCESS" ]; then
+                color="00FF00"  # Green for success
+                emoji="✅"
+            fi
+            
+            # Send Teams message card using webhook
+            curl -X POST -H 'Content-Type: application/json' \
+                -d "{
+                    \"@type\": \"MessageCard\",
+                    \"@context\": \"https://schema.org/extensions\",
+                    \"summary\": \"ETCD Backup ${status}\",
+                    \"themeColor\": \"${color}\",
+                    \"title\": \"${emoji} ETCD Backup ${status}\",
+                    \"sections\": [{
+                        \"activityTitle\": \"Cluster: ${CLUSTER_NAME:-unknown}\",
+                        \"facts\": [
+                            {\"name\": \"Status\", \"value\": \"${status}\"},
+                            {\"name\": \"Node\", \"value\": \"${NODE_NAME:-unknown}\"},
+                            {\"name\": \"Message\", \"value\": \"${message}\"},
+                            {\"name\": \"Time\", \"value\": \"$(date)\"},
+                            {\"name\": \"Namespace\", \"value\": \"gt-operators"}
+                        ]
+                    }]
+                }" \
+                "${TEAMS_WEBHOOK_URL}" || echo "Failed to send Teams notification"
+        fi
+        
+        # Also log to stdout for pod logs
+        echo "${status}: ${message}"
+    }
+    
+    # ===== SERVICENOW INTEGRATION =====
+    servicenow_api() {
+      [ "$ENABLE_SERVICENOW" != "true" ] && return 1
+      [ -z "$SERVICENOW_INSTANCE" ] || [ "$SERVICENOW_INSTANCE" == "your-instance.service-now.com" ] && return 1
+      
+      local action="$1"
+      local desc=$(printf '%s' "$2" | sed 's/"/\\"/g' | tr '\n' ' ')
+      
+      if [ "$action" == "create" ]; then
+        local payload="{\"short_description\":\"CRITICAL: etcd Backup Failed - ${CLUSTER_NAME}/${NODE_NAME}\",\"description\":\"${desc}\\n\\nCluster: ${CLUSTER_NAME}\\nNode: ${NODE_NAME}\\nTime: $(date)\",\"urgency\":\"1\",\"impact\":\"1\",\"priority\":\"1\",\"assignment_group\":\"$SERVICENOW_ASSIGNMENT_GROUP\",\"category\":\"$SERVICENOW_CATEGORY\",\"subcategory\":\"$SERVICENOW_SUBCATEGORY\",\"u_cluster_name\":\"$CLUSTER_NAME\",\"u_backup_node\":\"$NODE_NAME\",\"state\":\"1\"}"
+        local resp=$(curl -s -w "\n%{http_code}" -u "$SERVICENOW_USER:$SERVICENOW_PASS" -H "Content-Type: application/json" -d "$payload" "https://$SERVICENOW_INSTANCE/api/now/table/incident" 2>&1)
+        local code=$(echo "$resp" | tail -n1)
+        [ "$code" == "201" ] && echo "$resp" | head -n -1 | grep -o '"number":"[^"]*' | cut -d'"' -f4 && return 0
+        
+      elif [ "$action" == "check" ]; then
+        local ts=$(date -u -d "24 hours ago" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -v-24H '+%Y-%m-%d %H:%M:%S')
+        local resp=$(curl -s -w "\n%{http_code}" -u "$SERVICENOW_USER:$SERVICENOW_PASS" "https://$SERVICENOW_INSTANCE/api/now/table/incident?sysparm_query=u_cluster_name=${CLUSTER_NAME}^u_backup_node=${NODE_NAME}^stateIN1,2,3^sys_created_on>=${ts}&sysparm_limit=1" 2>&1)
+        local code=$(echo "$resp" | tail -n1)
+        [ "$code" == "200" ] && echo "$resp" | head -n -1 | grep -o '"number":"[^"]*' | head -1 | cut -d'"' -f4 && return 0
+        
+      elif [ "$action" == "update" ]; then
+        local sys_id="$3"
+        local payload="{\"work_notes\":\"${desc}\"}"
+        curl -s -u "$SERVICENOW_USER:$SERVICENOW_PASS" -H "Content-Type: application/json" -X PATCH -d "$payload" "https://$SERVICENOW_INSTANCE/api/now/table/incident/$sys_id" >/dev/null && return 0
+      fi
+      return 1
+    }
+    
+    # ===== ERROR HANDLING =====
+    handle_error() {
+        local error_msg="Backup failed at line $1. Check logs: kubectl logs -n gt-operators <pod-name>"
+        echo "❌ ERROR: $error_msg"
+        
+        # Check for existing ticket and get sys_id
+        local ticket=$(servicenow_api "check")
+        
+        if [ -n "$ticket" ]; then
+            echo "  ℹ️  Updating existing ticket: $ticket"
+            local sys_id=$(curl -s -u "$SERVICENOW_USER:$SERVICENOW_PASS" "https://$SERVICENOW_INSTANCE/api/now/table/incident?sysparm_query=number=${ticket}&sysparm_limit=1" 2>/dev/null | grep -o '"sys_id":"[^"]*' | head -1 | cut -d'"' -f4)
+            servicenow_api "update" "BACKUP FAILURE: ${error_msg}\nNode: ${NODE_NAME}\nTime: $(date)" "$sys_id"
+            send_notification "FAILED" "${error_msg}\n\n📋 Ticket: ${ticket} (updated)"
+        else
+            echo "  ℹ️  Creating new ServiceNow ticket"
+            ticket=$(servicenow_api "create" "etcd backup failed: ${error_msg}")
+            [ -n "$ticket" ] && send_notification "FAILED" "${error_msg}\n\n📋 Ticket: ${ticket}" || send_notification "FAILED" "${error_msg}"
+        fi
+        exit 1
+    }
+    
+    trap 'handle_error $LINENO' ERR
+    
+    # ===== DETECT CLUSTER TYPE AND PERFORM BACKUP =====
+    # Check if running on OpenShift (has different etcd backup method)
+    if [ -d "/host/etc/kubernetes/static-pod-resources/etcd-certs" ]; then
+        echo "Detected OpenShift cluster"
+        
+        # OpenShift: Get running etcd pod name
+        ETCD_POD=$(oc get pods -n openshift-etcd -l app=etcd --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+        
+        # Verify etcd pod was found
+        if [ -z "${ETCD_POD}" ]; then
+            send_notification "FAILED" "No running etcd pod found in openshift-etcd namespace. Possible causes: 1) etcd pods are not running, 2) etcd pods don't have label app=etcd, 3) All etcd pods are in non-Running state"
+            exit 1
+        fi
+        
+        echo "Backing up etcd from pod: ${ETCD_POD}"
+        
+        # Execute OpenShift cluster backup script inside etcd pod
+        oc exec -n openshift-etcd "${ETCD_POD}" -- /bin/sh -c \
+            "/usr/local/bin/cluster-backup.sh /home/core/assets/backup" || {
+            send_notification "FAILED" "cluster-backup.sh execution failed in pod ${ETCD_POD}. Possible causes: 1) cluster-backup.sh script not found, 2) Insufficient permissions, 3) Disk space issues on etcd pod"
+            exit 1
+        }
+        
+        # Copy backup files from etcd pod to backup directory
+        oc cp -n openshift-etcd "${ETCD_POD}:/home/core/assets/backup/" "${BACKUP_DIR}/temp-backup-${TIMESTAMP}/" || {
+            send_notification "FAILED" "Failed to copy backup from etcd pod ${ETCD_POD}. Possible causes: 1) Backup files not created, 2) Permission denied on target directory, 3) Network issues"
+            exit 1
+        }
+        
+        # Create compressed archive from copied files
+        cd "${BACKUP_DIR}"
+        tar -czf "${BACKUP_FILE}" -C "temp-backup-${TIMESTAMP}" . || {
+            send_notification "FAILED" "Failed to create backup archive. Possible causes: 1) Insufficient disk space in ${BACKUP_DIR}, 2) tar command failed, 3) Permission denied"
+            exit 1
+        }
+        
+        # Cleanup temporary directory
+        rm -rf "temp-backup-${TIMESTAMP}"
+        
+    else
+        # Standard Kubernetes (TKG, kubeadm, etc.)
+        echo "Detected standard Kubernetes cluster"
+        
+        # Verify etcd certificates are available (using config)
+        if [ ! -f "${ETCD_CACERT:-/etc/kubernetes/pki/etcd/ca.crt}" ]; then
+            send_notification "FAILED" "etcd CA certificate not found at ${ETCD_CACERT:-/etc/kubernetes/pki/etcd/ca.crt}. Possible causes: 1) Wrong certificate path for this cluster, 2) Certificates not mounted correctly, 3) etcd using different certificate location"
+            exit 1
+        fi
+        
+        # Create etcd snapshot using etcdctl (using config values)
+        ETCDCTL_API=3 etcdctl snapshot save "${BACKUP_DIR}/${BACKUP_FILE}" \
+            --endpoints="${ETCD_ENDPOINT:-https://127.0.0.1:2379}" \
+            --cacert="${ETCD_CACERT:-/etc/kubernetes/pki/etcd/ca.crt}" \
+            --cert="${ETCD_CERT:-/etc/kubernetes/pki/etcd/server.crt}" \
+            --key="${ETCD_KEY:-/etc/kubernetes/pki/etcd/server.key}" || {
+            send_notification "FAILED" "etcdctl snapshot failed on node ${NODE_NAME}. Possible causes: 1) etcd not listening on ${ETCD_ENDPOINT}, 2) Certificate authentication failed, 3) etcd not healthy, 4) Insufficient disk space in ${BACKUP_DIR}, 5) Network connectivity issues"
+            exit 1
+        }
+    fi
+    
+    # ===== VERIFY BACKUP =====
+    # Check that backup file was created successfully
+    if [ ! -f "${BACKUP_DIR}/${BACKUP_FILE}" ]; then
+        send_notification "FAILED" "Backup file was not created at ${BACKUP_DIR}/${BACKUP_FILE}. Possible causes: 1) Backup command failed silently, 2) Permission issues, 3) Disk full"
+        exit 1
+    fi
+    
+    # Get backup file size in human-readable format
+    BACKUP_SIZE=$(du -h "${BACKUP_DIR}/${BACKUP_FILE}" | cut -f1)
+    echo "Backup created: ${BACKUP_FILE} (Size: ${BACKUP_SIZE})"
+    
+    # ===== CLEANUP OLD BACKUPS =====
+    # Keep only the last MAX_BACKUPS backups for this specific node
+    echo "Cleaning up old backups (keeping last ${MAX_BACKUPS})..."
+    cd "${BACKUP_DIR}"
+    # List backups for this node, sorted by time, delete old ones
+    # tail -n +$((MAX_BACKUPS + 1)): Skip first MAX_BACKUPS files, delete the rest
+    ls -t etcd-backup-${NODE_NAME}-*.tar.gz 2>/dev/null | tail -n +$((MAX_BACKUPS + 1)) | xargs -r rm -f
+    
+    # Count remaining backups for reporting
+    REMAINING_BACKUPS=$(ls -1 etcd-backup-${NODE_NAME}-*.tar.gz 2>/dev/null | wc -l)  # This node's backups
+    TOTAL_ALL_BACKUPS=$(ls -1 etcd-backup-*.tar.gz 2>/dev/null | wc -l)  # All nodes' backups
+    echo "Backup completed successfully. Node backups: ${REMAINING_BACKUPS}, Total all nodes: ${TOTAL_ALL_BACKUPS}"
+    
+    # ===== SUCCESS NOTIFICATION =====
+    SUCCESS_MSG="Backup completed. File: ${BACKUP_FILE}, Size: ${BACKUP_SIZE}, Node backups: ${REMAINING_BACKUPS}, Total: ${TOTAL_ALL_BACKUPS}"
+    
+    if [ "$ENABLE_SUCCESS_NOTIFICATIONS" == "true" ]; then
+        echo "  📤 Sending success notification..."
+        send_notification "SUCCESS" "$SUCCESS_MSG"
+    else
+        echo "  ℹ️  Success notifications disabled"
+        echo "SUCCESS: $SUCCESS_MSG"
+    fi
+    
+    exit 0
+---
+# CronJob: Scheduled backup job configuration
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-backup
+  namespace: gt-operators
+spec:
+  # Schedule: Run every night at 2 AM (cron format: minute hour day month weekday)
+  schedule: "0 2 * * *"
+  # Keep last 3 successful and 3 failed jobs for debugging
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  # Allow concurrent jobs to run on different control plane nodes
+  concurrencyPolicy: Allow
+  jobTemplate:
+    spec:
+      # Create one pod per control plane node (3 nodes = 3 pods)
+      completions: 3    # Total number of pods to run
+      parallelism: 3    # Number of pods to run simultaneously
+      # Retry once on failure
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: etcd-backup  # Label used for pod identification
+        spec:
+          serviceAccountName: etcd-backup-sa  # Use the ServiceAccount for RBAC
+{% if enable_registry_secret | default(false) %}
+          imagePullSecrets:
+            - name: regcred
+{% endif %}
+          # ===== POD SCHEDULING CONFIGURATION =====
+          # Affinity rules: Ensure one pod runs on each control plane node
+          affinity:
+            # Pod Anti-Affinity: Prevent multiple backup pods on same node
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                    - etcd-backup
+                topologyKey: "kubernetes.io/hostname"  # Distribute by hostname
+            # Node Affinity: Only run on control plane nodes
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists  # Node must have control-plane role
+          # ===== TOLERATIONS =====
+          # Allow pod to run on control plane nodes (they have NoSchedule taint)
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+            - key: node-role.kubernetes.io/master
+              operator: Exists
+              effect: NoSchedule
+          # ===== NETWORKING AND SECURITY =====
+          # Use host network to access etcd on localhost:2379
+          hostNetwork: true
+          # Use host PID namespace for process visibility
+          hostPID: true
+          # Restart policy: Only restart on failure
+          restartPolicy: OnFailure
+          # ===== CONTAINER CONFIGURATION =====
+          containers:
+            - name: etcd-backup
+              # Use Alpine Linux (lightweight, 5MB base image)
+              image: alpine:3.19
+              imagePullPolicy: IfNotPresent  # Use cached image if available
+              command: ["/bin/sh"]
+              args: ["/scripts/backup.sh"]  # Run the backup script
+              
+              # Load all configuration and secrets
+              envFrom:
+                - secretRef:
+                    name: teams-webhook
+                - configMapRef:
+                    name: etcd-backup-config
+              
+              # ===== VOLUME MOUNTS =====
+              volumeMounts:
+                # Mount backup script from ConfigMap
+                - name: backup-script
+                  mountPath: /scripts
+                # Mount backup directory from host
+                - name: host-backup-dir
+                  mountPath: /opt/backup
+                # Mount etcd certificates (read-only)
+                - name: etcd-certs
+                  mountPath: /etc/kubernetes/pki/etcd
+                  readOnly: true
+                # Mount Kubernetes config directory (read-only)
+                - name: host-etc-kubernetes
+                  mountPath: /host/etc/kubernetes
+                  readOnly: true
+              # ===== SECURITY CONTEXT =====
+              securityContext:
+                privileged: true  # Required for host filesystem and etcd access
+              # ===== RESOURCE LIMITS =====
+              resources:
+                requests:
+                  cpu: 100m       # Request 0.1 CPU cores
+                  memory: 256Mi   # Request 256MB RAM
+                limits:
+                  cpu: 500m       # Limit to 0.5 CPU cores
+                  memory: 512Mi   # Limit to 512MB RAM
+          # ===== VOLUMES =====
+          volumes:
+            # Volume 1: Backup script from ConfigMap
+            - name: backup-script
+              configMap:
+                name: etcd-backup-script
+                defaultMode: 0755  # Make script executable
+            # Volume 2: Backup directory on host
+            - name: host-backup-dir
+              hostPath:
+                path: /opt/backup
+                type: DirectoryOrCreate  # Create if doesn't exist
+            # Volume 3: etcd certificates
+            - name: etcd-certs
+              hostPath:
+                path: /etc/kubernetes/pki/etcd
+                type: DirectoryOrCreate
+            # Volume 4: Kubernetes config directory
+            - name: host-etc-kubernetes
+              hostPath:
+                path: /etc/kubernetes
+                type: DirectoryOrCreate
+---
+# Secret: Microsoft Teams webhook URL and ServiceNow credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: teams-webhook
+  namespace: gt-operators
+type: Opaque
+stringData:
+  # Teams webhook URL
+  # To get webhook: Teams Channel → Connectors → Incoming Webhook
+  TEAMS_WEBHOOK_URL: "{{ vault_teams_webhook_url }}"
+  
+  # ServiceNow credentials
+  SERVICENOW_INSTANCE: "{{ servicenow_instance }}"
+  SERVICENOW_USER: "{{ servicenow_user }}"
+  SERVICENOW_PASS: "{{ servicenow_password }}"

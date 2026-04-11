@@ -1,0 +1,47 @@
+apiVersion: tuned.openshift.io/v1
+kind: Tuned
+metadata:
+  name: infra-network-latency
+  namespace: openshift-cluster-node-tuning-operator
+spec:
+  profile:
+  - data: |
+      [main]
+      summary=Optimize for low network latency on infra nodes
+      include=network-latency
+      
+      [sysctl]
+      # Network busy polling - reduces latency by polling network device instead of waiting for interrupts
+      net.core.busy_read=50                                    # Poll for 50 microseconds on socket reads (reduces interrupt overhead)
+      net.core.busy_poll=50                                    # Poll for 50 microseconds on socket operations (lower latency for high-traffic)
+      net.ipv4.tcp_fastopen=3                                  # Enable TCP Fast Open (3=client+server, reduces connection setup time)
+      
+      # Connection tracking - critical for high-traffic ingress handling thousands of concurrent connections
+      net.netfilter.nf_conntrack_max=1048576                   # Max tracked connections (default: 262144, increase for HAProxy/Router)
+      net.netfilter.nf_conntrack_tcp_timeout_established=600   # Keep established connections for 10 minutes (reduces table churn)
+      
+      # TCP/IP stack tuning - optimizes HAProxy/Router performance
+      net.ipv4.ip_local_port_range=10000 65535                 # Ephemeral port range (more ports = more concurrent connections)
+      net.ipv4.tcp_tw_reuse=1                                  # Reuse TIME_WAIT sockets for new connections (faster connection recycling)
+      net.core.somaxconn=4096                                  # Max queued connections (default: 128, increase for burst traffic)
+      net.ipv4.tcp_max_syn_backlog=8192                        # Max half-open connections (default: 1024, protects against SYN floods)
+      
+      # Kernel CPU scheduling - reduces latency for network workloads
+      kernel.sched_autogroup_enabled=0                         # Disable autogroup scheduling (ensures consistent latency)
+      
+      [vm]
+      # Memory management - ensures consistent latency
+      transparent_hugepages=never                              # Disable THP (prevents latency spikes from page compaction)
+      
+      [bootloader]
+      # Kernel boot parameters for low-latency networking
+      cmdline_network_latency=skew_tick=1 tsc=reliable rcupdate.rcu_normal_after_boot=1
+      # skew_tick=1: Prevents timer interrupts from firing simultaneously on all CPUs (reduces jitter)
+      # tsc=reliable: Uses TSC for timing (more accurate, lower overhead than HPET)
+      # rcupdate.rcu_normal_after_boot=1: Reduces RCU overhead after boot (better for real-time workloads)
+    name: infra-network-latency
+  recommend:
+  - match:
+    - label: node-role.kubernetes.io/infra
+    priority: 5
+    profile: infra-network-latency

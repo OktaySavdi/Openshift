@@ -1,0 +1,538 @@
+---
+# ServiceAccount for certificate monitoring
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-expiry-monitor-sa
+  namespace: gt-operators
+
+---
+# ClusterRole with permissions to read secrets and certificates
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-expiry-monitor-role
+rules:
+  # Permission to list and read secrets across all namespaces
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list", "get"]
+  # Permission to read configmaps (for custom CAs)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["list", "get"]
+  # Permission to read namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list", "get"]
+  # Permission to check for cert-manager CRDs
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["list", "get"]
+  # Permission to read cert-manager certificates
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["list", "get"]
+
+---
+# ClusterRoleBinding to grant the ServiceAccount cluster-wide permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cert-expiry-monitor-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cert-expiry-monitor-role
+subjects:
+  - kind: ServiceAccount
+    name: cert-expiry-monitor-sa
+    namespace: gt-operators
+
+---
+# ConfigMap for certificate expiry monitor configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cert-expiry-monitor-config
+  namespace: gt-operators
+data:
+  # Cluster Configuration
+  CLUSTER_NAME: "gtocpmyntpoc01"
+  
+  # Alert Thresholds (days before expiry)
+  THRESHOLD_60_DAYS: "60"
+  THRESHOLD_45_DAYS: "45"
+  THRESHOLD_30_DAYS: "30"
+  THRESHOLD_14_DAYS: "14"
+  THRESHOLD_7_DAYS: "7"
+  
+  # ServiceNow Configuration
+  SERVICENOW_ASSIGNMENT_GROUP: "{{ servicenow_assignment_group }}"
+  SERVICENOW_CATEGORY: "Kubernetes"
+  SERVICENOW_SUBCATEGORY: "Certificate Expiry"
+  SERVICENOW_CALLER_ID: "cert-monitor-operator"
+  SERVICENOW_CONTACT_TYPE: "Monitoring"
+  
+  # Feature Flags
+  ENABLE_SERVICENOW: "true"
+  ENABLE_TEAMS_ALERTS: "true"
+
+---
+# Secret for Teams webhook URL and ServiceNow credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cert-teams-webhook
+  namespace: gt-operators
+type: Opaque
+stringData:
+  # Teams webhook URL
+  TEAMS_WEBHOOK_URL: "{{ vault_teams_webhook_url }}"
+  
+  # ServiceNow credentials
+  SERVICENOW_INSTANCE: "{{ servicenow_instance }}"
+  SERVICENOW_USER: "{{ servicenow_user }}"
+  SERVICENOW_PASS: "{{ servicenow_password }}"
+
+---
+# ConfigMap containing the monitoring script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cert-expiry-script
+  namespace: gt-operators
+data:
+  monitor.sh: |
+    #!/bin/bash
+    # ============================================================
+    # Certificate Expiry Monitor
+    # Purpose: Monitor TLS certificates and alert before expiry
+    # ============================================================
+    
+    set -e
+    
+    echo "=========================================="
+    echo "Certificate Expiry Monitor Starting"
+    echo "Time: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "=========================================="
+    
+    # Configuration from ConfigMap/Secret
+    CLUSTER_NAME="${CLUSTER_NAME:-kubernetes-cluster}"
+    
+    echo "Cluster: $CLUSTER_NAME"
+    echo ""
+    
+    # Check Teams webhook
+    WEBHOOK_URL="${TEAMS_WEBHOOK_URL}"
+    if [ -z "$WEBHOOK_URL" ] || [ "$WEBHOOK_URL" == "https://your-teams-webhook-url-here" ]; then
+      echo "⚠️  WARNING: Teams webhook not configured. Skipping notifications."
+      SEND_TEAMS=false
+    else
+      SEND_TEAMS=true
+    fi
+    
+    # Alert thresholds (days) from ConfigMap
+    THRESHOLDS=(
+      ${THRESHOLD_60_DAYS:-60}
+      ${THRESHOLD_45_DAYS:-45}
+      ${THRESHOLD_30_DAYS:-30}
+      ${THRESHOLD_14_DAYS:-14}
+      ${THRESHOLD_7_DAYS:-7}
+    )
+    
+    echo "Alert Thresholds: ${THRESHOLDS[@]} days"
+    echo ""
+    
+    # Temp files
+    CERT_REPORT="/tmp/cert_report_$$.txt"
+    ALERTS="/tmp/cert_alerts_$$.json"
+    
+    > "$CERT_REPORT"
+    > "$ALERTS"
+    
+    # ===== SERVICENOW INTEGRATION =====
+    servicenow_api() {
+      [ "$ENABLE_SERVICENOW" != "true" ] && return 1
+      [ -z "$SERVICENOW_INSTANCE" ] || [ "$SERVICENOW_INSTANCE" == "your-instance.service-now.com" ] && return 1
+      
+      local action="$1"
+      local desc=$(printf '%s' "$2" | sed 's/"/\\"/g' | tr '\n' ' ')
+      
+      if [ "$action" == "create" ]; then
+        local payload="{\"short_description\":\"CRITICAL: Certificate Expiry Alert - ${CLUSTER_NAME}\",\"description\":\"${desc}\\n\\nCluster: ${CLUSTER_NAME}\\nTime: $(date)\",\"urgency\":\"1\",\"impact\":\"1\",\"priority\":\"1\",\"assignment_group\":\"$SERVICENOW_ASSIGNMENT_GROUP\",\"category\":\"$SERVICENOW_CATEGORY\",\"subcategory\":\"$SERVICENOW_SUBCATEGORY\",\"u_cluster_name\":\"$CLUSTER_NAME\",\"state\":\"1\"}"
+        local resp=$(curl -s -w "\n%{http_code}" -u "$SERVICENOW_USER:$SERVICENOW_PASS" -H "Content-Type: application/json" -d "$payload" "https://$SERVICENOW_INSTANCE/api/now/table/incident" 2>&1)
+        local code=$(echo "$resp" | tail -n1)
+        [ "$code" == "201" ] && echo "$resp" | head -n -1 | grep -o '"number":"[^"]*' | cut -d'"' -f4 && return 0
+        
+      elif [ "$action" == "check" ]; then
+        local ts=$(date -u -d "24 hours ago" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -v-24H '+%Y-%m-%d %H:%M:%S')
+        local resp=$(curl -s -w "\n%{http_code}" -u "$SERVICENOW_USER:$SERVICENOW_PASS" "https://$SERVICENOW_INSTANCE/api/now/table/incident?sysparm_query=u_cluster_name=${CLUSTER_NAME}^stateIN1,2,3^sys_created_on>=${ts}&sysparm_limit=1" 2>&1)
+        local code=$(echo "$resp" | tail -n1)
+        [ "$code" == "200" ] && echo "$resp" | head -n -1 | grep -o '"number":"[^"]*' | head -1 | cut -d'"' -f4 && return 0
+        
+      elif [ "$action" == "update" ]; then
+        local sys_id="$3"
+        local payload="{\"work_notes\":\"${desc}\"}"
+        curl -s -u "$SERVICENOW_USER:$SERVICENOW_PASS" -H "Content-Type: application/json" -X PATCH -d "$payload" "https://$SERVICENOW_INSTANCE/api/now/table/incident/$sys_id" >/dev/null && return 0
+      fi
+      return 1
+    }
+    
+    # Function to send Teams notification
+    send_teams_alert() {
+      local title="$1"
+      local message="$2"
+      local color="$3"
+      
+      if [ "$ENABLE_TEAMS_ALERTS" != "true" ]; then
+        echo "  ℹ️  Teams alerts disabled via configuration"
+        return 0
+      fi
+      
+      if [ "$SEND_TEAMS" != "true" ]; then
+        echo "  ⚠️  Teams notification skipped (webhook not configured)"
+        return
+      fi
+      
+      local payload=$(cat <<EOF
+    {
+      "@type": "MessageCard",
+      "@context": "https://schema.org/extensions",
+      "summary": "$title",
+      "themeColor": "$color",
+      "title": "$title",
+      "sections": [{
+        "activityTitle": "Cluster: $CLUSTER_NAME",
+        "activitySubtitle": "$(date '+%Y-%m-%d %H:%M:%S UTC')",
+        "facts": [
+          {
+            "name": "Cluster:",
+            "value": "$CLUSTER_NAME"
+          }
+        ],
+        "text": "$message",
+        "markdown": true
+      }]
+    }
+    EOF
+    )
+      
+      echo "  📤 Sending Teams notification..."
+      RESPONSE=$(curl -s -w "\n%{http_code}" -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL" 2>&1)
+      HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+      
+      if [ "$HTTP_CODE" == "200" ]; then
+        echo "  ✅ Teams notification sent successfully"
+      else
+        echo "  ❌ Teams notification failed (HTTP $HTTP_CODE)"
+        echo "  Response: $(echo "$RESPONSE" | head -n-1)"
+      fi
+    }
+    
+    # Function to check certificate expiry
+    check_cert_expiry() {
+      local cert_data="$1"
+      local cert_name="$2"
+      local cert_namespace="$3"
+      local cert_type="$4"
+      
+      # Decode and parse certificate
+      local cert_pem=$(echo "$cert_data" | base64 -d 2>/dev/null || echo "")
+      if [ -z "$cert_pem" ]; then
+        return
+      fi
+      
+      # Get certificate details
+      local expiry_date=$(echo "$cert_pem" | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+      if [ -z "$expiry_date" ]; then
+        return
+      fi
+      
+      local expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null || date -j -f "%b %d %T %Y %Z" "$expiry_date" +%s 2>/dev/null)
+      local now_epoch=$(date +%s)
+      local days_until_expiry=$(( (expiry_epoch - now_epoch) / 86400 ))
+      
+      # Get issuer and subject
+      local issuer=$(echo "$cert_pem" | openssl x509 -noout -issuer 2>/dev/null | sed 's/issuer=//')
+      local subject=$(echo "$cert_pem" | openssl x509 -noout -subject 2>/dev/null | sed 's/subject=//')
+      
+      # Determine if self-signed
+      local is_self_signed="No"
+      if [ "$issuer" == "$subject" ]; then
+        is_self_signed="Yes (Self-Signed)"
+      fi
+      
+      # Determine alert level
+      local alert_level=""
+      local color=""
+      if [ $days_until_expiry -le 7 ]; then
+        alert_level="🔴 CRITICAL"
+        color="FF0000"
+      elif [ $days_until_expiry -le 14 ]; then
+        alert_level="🟠 WARNING"
+        color="FFA500"
+      elif [ $days_until_expiry -le 30 ]; then
+        alert_level="🟡 NOTICE"
+        color="FFD700"
+      elif [ $days_until_expiry -le 45 ]; then
+        alert_level="🟢 INFO"
+        color="00FF00"
+      elif [ $days_until_expiry -le 60 ]; then
+        alert_level="ℹ️ INFO"
+        color="0078D4"
+      fi
+      
+      # Log certificate info
+      echo "Certificate: $cert_name (Namespace: $cert_namespace, Type: $cert_type)" >> "$CERT_REPORT"
+      echo "  Expires: $expiry_date ($days_until_expiry days)" >> "$CERT_REPORT"
+      echo "  Issuer: $issuer" >> "$CERT_REPORT"
+      echo "  Self-Signed: $is_self_signed" >> "$CERT_REPORT"
+      echo "  Alert Level: $alert_level" >> "$CERT_REPORT"
+      echo "" >> "$CERT_REPORT"
+      
+      # Check if we should alert
+      for threshold in "${THRESHOLDS[@]}"; do
+        if [ $days_until_expiry -eq $threshold ]; then
+          local alert_msg="**Certificate:** \`$cert_name\`  \\n**Namespace:** \`$cert_namespace\`  \\n**Type:** \`$cert_type\`  \\n**Expires in:** $days_until_expiry days  \\n**Expiry Date:** $expiry_date  \\n**Self-Signed:** $is_self_signed"
+          
+          # Create ServiceNow ticket for critical (7 days or less) certificates
+          if [ $days_until_expiry -le 7 ]; then
+            local ticket=$(servicenow_api "check")
+            
+            if [ -n "$ticket" ]; then
+              echo "  ℹ️  Updating existing ServiceNow ticket: $ticket"
+              local sys_id=$(curl -s -u "$SERVICENOW_USER:$SERVICENOW_PASS" "https://$SERVICENOW_INSTANCE/api/now/table/incident?sysparm_query=number=${ticket}&sysparm_limit=1" 2>/dev/null | grep -o '"sys_id":"[^"]*' | head -1 | cut -d'"' -f4)
+              servicenow_api "update" "CERT EXPIRY: Certificate $cert_name in $cert_namespace expires in $days_until_expiry days (Type: $cert_type, Expiry: $expiry_date)" "$sys_id"
+              send_teams_alert "$alert_level Certificate Expiring Soon!" "$alert_msg\\n\\n📋 Ticket: ${ticket} (updated)" "$color"
+            else
+              echo "  ℹ️  Creating new ServiceNow ticket"
+              ticket=$(servicenow_api "create" "Certificate $cert_name in $cert_namespace expires in $days_until_expiry days (Type: $cert_type, Expiry: $expiry_date, Self-Signed: $is_self_signed)")
+              [ -n "$ticket" ] && send_teams_alert "$alert_level Certificate Expiring Soon!" "$alert_msg\\n\\n📋 Ticket: ${ticket}" "$color" || send_teams_alert "$alert_level Certificate Expiring Soon!" "$alert_msg" "$color"
+            fi
+          else
+            send_teams_alert "$alert_level Certificate Expiring Soon!" "$alert_msg" "$color"
+          fi
+          
+          echo "  ⚠️  ALERT SENT (expires in $days_until_expiry days)" >> "$CERT_REPORT"
+        fi
+      done
+      
+      # Always alert for expired certs with ServiceNow ticket
+      if [ $days_until_expiry -lt 0 ]; then
+        local alert_msg="**Certificate:** \`$cert_name\`  \\n**Namespace:** \`$cert_namespace\`  \\n**Type:** \`$cert_type\`  \\n**EXPIRED:** $((-days_until_expiry)) days ago  \\n**Expiry Date:** $expiry_date"
+        
+        local ticket=$(servicenow_api "check")
+        
+        if [ -n "$ticket" ]; then
+          echo "  ℹ️  Updating existing ServiceNow ticket: $ticket"
+          local sys_id=$(curl -s -u "$SERVICENOW_USER:$SERVICENOW_PASS" "https://$SERVICENOW_INSTANCE/api/now/table/incident?sysparm_query=number=${ticket}&sysparm_limit=1" 2>/dev/null | grep -o '"sys_id":"[^"]*' | head -1 | cut -d'"' -f4)
+          servicenow_api "update" "CERT EXPIRED: Certificate $cert_name in $cert_namespace EXPIRED $((-days_until_expiry)) days ago (Type: $cert_type, Expiry: $expiry_date)" "$sys_id"
+          send_teams_alert "🚨 EXPIRED Certificate!" "$alert_msg\\n\\n📋 Ticket: ${ticket} (updated)" "FF0000"
+        else
+          echo "  ℹ️  Creating new ServiceNow ticket"
+          ticket=$(servicenow_api "create" "Certificate $cert_name in $cert_namespace EXPIRED $((-days_until_expiry)) days ago (Type: $cert_type, Expiry: $expiry_date)")
+          [ -n "$ticket" ] && send_teams_alert "🚨 EXPIRED Certificate!" "$alert_msg\\n\\n📋 Ticket: ${ticket}" "FF0000" || send_teams_alert "🚨 EXPIRED Certificate!" "$alert_msg" "FF0000"
+        fi
+        
+        echo "  🚨 EXPIRED $days_until_expiry days ago!" >> "$CERT_REPORT"
+      fi
+      
+      # Alert for certificates expiring within threshold range (not exact match)
+      if [ $days_until_expiry -le 7 ] && [ $days_until_expiry -ge 0 ]; then
+        # Only send if not already sent for exact threshold
+        local already_sent=false
+        for threshold in "${THRESHOLDS[@]}"; do
+          if [ $days_until_expiry -eq $threshold ]; then
+            already_sent=true
+            break
+          fi
+        done
+        
+        if [ "$already_sent" == "false" ]; then
+          local alert_msg="**Certificate:** \`$cert_name\`  \\n**Namespace:** \`$cert_namespace\`  \\n**Type:** \`$cert_type\`  \\n**Expires in:** $days_until_expiry days  \\n**Expiry Date:** $expiry_date  \\n**Self-Signed:** $is_self_signed"
+          
+          local ticket=$(servicenow_api "check")
+          
+          if [ -n "$ticket" ]; then
+            echo "  ℹ️  Updating existing ServiceNow ticket: $ticket"
+            local sys_id=$(curl -s -u "$SERVICENOW_USER:$SERVICENOW_PASS" "https://$SERVICENOW_INSTANCE/api/now/table/incident?sysparm_query=number=${ticket}&sysparm_limit=1" 2>/dev/null | grep -o '"sys_id":"[^"]*' | head -1 | cut -d'"' -f4)
+            servicenow_api "update" "CERT EXPIRY: Certificate $cert_name in $cert_namespace expires in $days_until_expiry days (Type: $cert_type, Expiry: $expiry_date)" "$sys_id"
+            send_teams_alert "$alert_level Certificate Expiring Soon!" "$alert_msg\\n\\n📋 Ticket: ${ticket} (updated)" "$color"
+          else
+            echo "  ℹ️  Creating new ServiceNow ticket"
+            ticket=$(servicenow_api "create" "Certificate $cert_name in $cert_namespace expires in $days_until_expiry days (Type: $cert_type, Expiry: $expiry_date)")
+            [ -n "$ticket" ] && send_teams_alert "$alert_level Certificate Expiring Soon!" "$alert_msg\\n\\n📋 Ticket: ${ticket}" "$color" || send_teams_alert "$alert_level Certificate Expiring Soon!" "$alert_msg" "$color"
+          fi
+          
+          echo "  ⚠️  ALERT SENT (expires in $days_until_expiry days)" >> "$CERT_REPORT"
+        fi
+      fi
+    }
+    
+    echo ""
+    echo "=== Scanning Application TLS Certificates ==="
+    
+    # Get all TLS secrets across all namespaces
+    TLS_SECRET_COUNT=0
+    kubectl get secrets -A -o json | jq -r '.items[] | select(.type=="kubernetes.io/tls") | "\(.metadata.namespace)|\(.metadata.name)|\(.data."tls.crt")"' | while IFS='|' read -r namespace name cert_data; do
+      if [ -n "$cert_data" ]; then
+        echo "Checking TLS secret: $name in namespace: $namespace"
+        check_cert_expiry "$cert_data" "$name" "$namespace" "Application TLS Secret"
+        TLS_SECRET_COUNT=$((TLS_SECRET_COUNT + 1))
+      fi
+    done
+    
+    echo ""
+    echo "=== Scanning Custom CA Certificates ==="
+    
+    # Check for custom CA certificates in configmaps (common pattern for custom CAs)
+    kubectl get configmaps -A -o json | jq -r '.items[] | select(.data | has("ca.crt") or has("ca-bundle.crt") or has("root-ca.crt")) | "\(.metadata.namespace)|\(.metadata.name)|\(.data."ca.crt" // .data."ca-bundle.crt" // .data."root-ca.crt")"' | while IFS='|' read -r namespace name cert_data; do
+      if [ -n "$cert_data" ]; then
+        # Try to parse as certificate
+        CERT_PEM=$(echo "$cert_data" | head -50)
+        if echo "$CERT_PEM" | grep -q "BEGIN CERTIFICATE"; then
+          CERT_B64=$(echo "$CERT_PEM" | base64 | tr -d '\n')
+          echo "Checking custom CA from ConfigMap: $name in namespace: $namespace"
+          check_cert_expiry "$CERT_B64" "$name-ca" "$namespace" "Custom CA (ConfigMap)"
+        fi
+      fi
+    done
+    
+    # Check for cert-manager issued certificates
+    echo ""
+    echo "=== Scanning cert-manager Certificates ==="
+    if kubectl get crd certificates.cert-manager.io 2>/dev/null >/dev/null; then
+      echo "cert-manager detected, checking managed certificates..."
+      kubectl get certificates -A -o json 2>/dev/null | jq -r '.items[] | "\(.metadata.namespace)|\(.metadata.name)|\(.spec.secretName)"' | while IFS='|' read -r namespace cert_name secret_name; do
+        # Get the actual certificate from the secret
+        CERT_DATA=$(kubectl get secret "$secret_name" -n "$namespace" -o jsonpath='{.data.tls\.crt}' 2>/dev/null || echo "")
+        if [ -n "$CERT_DATA" ]; then
+          echo "Checking cert-manager certificate: $cert_name in namespace: $namespace"
+          check_cert_expiry "$CERT_DATA" "$cert_name" "$namespace" "cert-manager Certificate"
+        fi
+      done
+    else
+      echo "  ℹ️  cert-manager not installed, skipping cert-manager certificates"
+    fi
+    
+    echo ""
+    echo "=== Scanning Service Mesh Certificates ==="
+    
+    # Check for Istio certificates (if Istio is installed)
+    if kubectl get namespace istio-system 2>/dev/null >/dev/null; then
+      echo "Istio detected, checking mesh certificates..."
+      kubectl get secrets -n istio-system -o json | jq -r '.items[] | select(.type=="kubernetes.io/tls" or (.metadata.name | test("cacert|cert-chain"))) | "\(.metadata.name)|\(.data."ca-cert.pem" // .data."cert-chain.pem" // .data."tls.crt" // empty)"' | while IFS='|' read -r name cert_data; do
+        if [ -n "$cert_data" ]; then
+          echo "Checking Istio certificate: $name"
+          check_cert_expiry "$cert_data" "$name" "istio-system" "Istio Mesh Certificate"
+        fi
+      done
+    else
+      echo "  ℹ️  Istio not detected, skipping service mesh certificates"
+    fi
+    
+    echo ""
+    echo "=== Scanning Ingress Controller Certificates ==="
+    
+    # Check common ingress namespaces for TLS certificates
+    for ns in ingress-nginx nginx-ingress traefik contour; do
+      if kubectl get namespace "$ns" 2>/dev/null >/dev/null; then
+        echo "Checking ingress controller in namespace: $ns"
+        kubectl get secrets -n "$ns" -o json | jq -r '.items[] | select(.type=="kubernetes.io/tls") | "\(.metadata.name)|\(.data."tls.crt")"' | while IFS='|' read -r name cert_data; do
+          if [ -n "$cert_data" ]; then
+            echo "Checking ingress TLS: $name in namespace: $ns"
+            check_cert_expiry "$cert_data" "$name" "$ns" "Ingress TLS Certificate"
+          fi
+        done
+      fi
+    done
+    
+    echo ""
+    echo "=== Informational: Kubernetes Platform Certificates ==="
+    echo "ℹ️  Platform certificates (API server, etcd, kubelet) are auto-renewed by Tanzu/managed platform"
+    
+    # Just check and display - no alerts needed
+    echo "Checking Kubernetes CA certificate (informational only)..."
+    if [ -f "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt" ]; then
+      CA_CERT_B64=$(cat /var/run/secrets/kubernetes.io/serviceaccount/ca.crt | base64 | tr -d '\n')
+      CA_EXPIRY=$(echo "$CA_CERT_B64" | base64 -d | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 || echo "Unknown")
+      echo "  Kubernetes CA expires: $CA_EXPIRY (auto-managed, no action needed)"
+    fi
+    
+    echo ""
+    echo "=========================================="
+    echo "Certificate Scan Complete"
+    echo "Report saved to: $CERT_REPORT"
+    echo "=========================================="
+    
+    # Display summary
+    cat "$CERT_REPORT"
+    
+    # Cleanup
+    rm -f "$CERT_REPORT" "$ALERTS"
+    
+    exit 0
+
+---
+# CronJob to run certificate monitoring daily at 9 AM
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cert-expiry-monitor
+  namespace: gt-operators
+spec:
+  # Run every day at 4:00 AM
+  schedule: "0 4 * * *"
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 86400  # Keep job for 24 hours
+      template:
+        metadata:
+          labels:
+            app: cert-expiry-monitor
+        spec:
+          serviceAccountName: cert-expiry-monitor-sa
+{% if enable_registry_secret | default(false) %}
+          imagePullSecrets:
+            - name: regcred
+{% endif %}
+          restartPolicy: OnFailure
+          containers:
+            - name: monitor
+              image: bitnami/kubectl:latest
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/bash"]
+              args: ["/scripts/monitor.sh"]
+              
+              # Load all configuration and secrets
+              envFrom:
+                - secretRef:
+                    name: cert-teams-webhook
+                - configMapRef:
+                    name: cert-expiry-monitor-config              
+              volumeMounts:
+                - name: monitor-script
+                  mountPath: /scripts
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                runAsUser: 1001
+                capabilities:
+                  drop:
+                    - ALL
+          volumes:
+            - name: monitor-script
+              configMap:
+                name: cert-expiry-script
+                defaultMode: 0755

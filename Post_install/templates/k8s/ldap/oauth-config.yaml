@@ -1,0 +1,22 @@
+apiVersion: config.openshift.io/v1
+kind: OAuth
+metadata:
+  name: cluster
+spec:
+  identityProviders:
+  - name: "{{ ldap_provider_name }}"
+    mappingMethod: "{{ ldap_mapping_method }}"
+    type: LDAP
+    ldap:
+      attributes:
+        id: {{ ldap_attributes.id | to_json }}
+        email: {{ ldap_attributes.email | to_json }}
+        name: {{ ldap_attributes.name | to_json }}
+        preferredUsername: {{ ldap_attributes.preferred_username | to_json }}
+      bindDN: "{{ ldap_bind_dn }}"
+      bindPassword:
+        name: "{{ ldap_secret_name }}"
+      ca:
+        name: "{{ ldap_ca_configmap_name }}"
+      insecure: false
+      url: "{{ ldap_url }}"

@@ -1,0 +1,20 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloud-integration
+  namespace: kubecost
+type: Opaque
+stringData:
+  cloud-integration.json: |
+    {
+      "azure": [
+        {
+          "azureSubscriptionID": "{{ vault_azure_subscription_id }}",
+          "azureTenantID": "{{ vault_azure_tenant_id }}",
+          "azureClientID": "{{ vault_azure_client_id }}",
+          "azureClientSecret": "{{ vault_azure_client_secret }}",
+          "azureStorageSubscriptionID": "{{ vault_azure_subscription_id }}"
+        }
+      ]
+    }

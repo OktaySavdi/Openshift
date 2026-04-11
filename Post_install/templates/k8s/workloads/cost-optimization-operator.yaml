@@ -1,0 +1,478 @@
+---
+# ServiceAccount for cost optimization monitoring
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cost-optimization-sa
+  namespace: gt-operators
+
+---
+# ClusterRole with permissions to read resources
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cost-optimization-role
+rules:
+  # Permission to read namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list", "get"]
+  # Permission to read pods
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+  # Permission to read deployments
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["list", "get"]
+  # Permission to read services
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list", "get"]
+  # Permission to read PVCs
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["list", "get"]
+  # Permission to read pod metrics
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cost-optimization-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cost-optimization-role
+subjects:
+  - kind: ServiceAccount
+    name: cost-optimization-sa
+    namespace: gt-operators
+
+---
+# Secret for Teams webhook URL
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cost-teams-webhook
+  namespace: gt-operators
+type: Opaque
+stringData:
+  webhook-url: "{{ vault_teams_webhook_url }}"
+
+---
+# ConfigMap containing the monitoring script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cost-optimization-script
+  namespace: gt-operators
+data:
+  optimize.sh: |
+    #!/bin/bash
+    # ============================================================
+    # Cost Optimization Operator
+    # Purpose: Identify over-provisioned resources and recommend right-sizing
+    # ============================================================
+    
+    set -e
+    
+    echo "=========================================="
+    echo "Cost Optimization Analysis Starting"
+    echo "Time: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "=========================================="
+    
+    # Get cluster name
+    CLUSTER_NAME="${CLUSTER_NAME:-kubernetes-cluster}"
+    echo "Cluster: $CLUSTER_NAME"
+    echo ""
+    
+    # Read Teams webhook from secret
+    WEBHOOK_URL="${TEAMS_WEBHOOK_URL}"
+    if [ -z "$WEBHOOK_URL" ] || [ "$WEBHOOK_URL" == "https://your-teams-webhook-url-here" ]; then
+      echo "⚠️  WARNING: Teams webhook not configured. Skipping notifications."
+      SEND_TEAMS=false
+    else
+      SEND_TEAMS=true
+    fi
+    
+    # Over-provisioning thresholds (pod requests vs actual usage)
+    CPU_OVERPROVISIONED_THRESHOLD=50    # If using < 50% of requested CPU
+    MEMORY_OVERPROVISIONED_THRESHOLD=50  # If using < 50% of requested memory
+    IDLE_CPU_THRESHOLD=10                # Pod using < 10m CPU is considered idle
+    IDLE_MEMORY_THRESHOLD=50             # Pod using < 50Mi memory is considered idle
+    
+    # Excluded namespaces (system namespaces to skip)
+    EXCLUDED_NAMESPACES="kube-system kube-public kube-node-lease tkg-system vmware-system- secretgen-controller tanzu- avi-system openshift- gt-operators"
+    
+    # Temp files
+    OVERPROVISIONED_REPORT="/tmp/overprovisioned_$$.txt"
+    IDLE_REPORT="/tmp/idle_$$.txt"
+    RECOMMENDATIONS_REPORT="/tmp/recommendations_$$.txt"
+    SUMMARY_REPORT="/tmp/summary_$$.txt"
+    > "$OVERPROVISIONED_REPORT"
+    > "$IDLE_REPORT"
+    > "$RECOMMENDATIONS_REPORT"
+    > "$SUMMARY_REPORT"
+    
+    # Counters
+    TOTAL_PODS=0
+    OVERPROVISIONED_PODS=0
+    IDLE_PODS=0
+    NO_REQUESTS_PODS=0
+    EXCLUDED_PODS=0
+    
+    # Cost savings estimates (rough approximations)
+    POTENTIAL_CPU_SAVINGS=0
+    POTENTIAL_MEMORY_SAVINGS=0
+    
+    # Function to send Teams notification
+    send_teams_alert() {
+      local title="$1"
+      local message="$2"
+      local color="$3"
+      
+      if [ "$SEND_TEAMS" != "true" ]; then
+        echo "  ⚠️  Teams notification skipped (webhook not configured)"
+        return
+      fi
+      
+      local payload=$(cat <<EOF
+    {
+      "@type": "MessageCard",
+      "@context": "https://schema.org/extensions",
+      "summary": "$title",
+      "themeColor": "$color",
+      "title": "$title",
+      "sections": [{
+        "activityTitle": "Cost Optimization Report",
+        "activitySubtitle": "$(date '+%Y-%m-%d %H:%M:%S UTC')",
+        "facts": [
+          {
+            "name": "Cluster:",
+            "value": "$CLUSTER_NAME"
+          }
+        ],
+        "text": "$message",
+        "markdown": true
+      }]
+    }
+    EOF
+    )
+      
+      echo "  📤 Sending Teams notification..."
+      RESPONSE=$(curl -s -w "\n%{http_code}" -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL" 2>&1)
+      HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+      
+      if [ "$HTTP_CODE" == "200" ]; then
+        echo "  ✅ Teams notification sent successfully"
+      else
+        echo "  ❌ Teams notification failed (HTTP $HTTP_CODE)"
+      fi
+    }
+    
+    # Function to convert CPU to millicores
+    cpu_to_millicores() {
+      local cpu="$1"
+      if [[ "$cpu" =~ m$ ]]; then
+        echo "${cpu%m}"
+      elif [[ "$cpu" =~ ^[0-9]+$ ]]; then
+        echo $((cpu * 1000))
+      else
+        echo "0"
+      fi
+    }
+    
+    # Function to convert memory to Mi
+    memory_to_mi() {
+      local mem="$1"
+      if [[ "$mem" =~ Mi$ ]]; then
+        echo "${mem%Mi}"
+      elif [[ "$mem" =~ Gi$ ]]; then
+        echo "${mem%Gi}" | awk '{printf "%.0f", $1 * 1024}'
+      elif [[ "$mem" =~ Ki$ ]]; then
+        echo "${mem%Ki}" | awk '{printf "%.0f", $1 / 1024}'
+      else
+        echo "0"
+      fi
+    }
+    
+    # Function to analyze a pod
+    analyze_pod() {
+      local namespace="$1"
+      local pod="$2"
+      
+      TOTAL_PODS=$((TOTAL_PODS + 1))
+      
+      # Get pod resource requests
+      POD_JSON=$(kubectl get pod "$pod" -n "$namespace" -o json 2>/dev/null)
+      
+      # Extract CPU and Memory requests (sum all containers)
+      CPU_REQUEST=$(echo "$POD_JSON" | jq -r '[.spec.containers[].resources.requests.cpu // "0"] | join(" ")' | tr -d '[:alpha:]')
+      MEMORY_REQUEST=$(echo "$POD_JSON" | jq -r '[.spec.containers[].resources.requests.memory // "0"] | .[0]')
+      
+      # Check if pod has no resource requests
+      if [ "$CPU_REQUEST" == "0" ] || [ -z "$CPU_REQUEST" ]; then
+        echo "  ⚠️  Pod $namespace/$pod has no CPU requests defined"
+        NO_REQUESTS_PODS=$((NO_REQUESTS_PODS + 1))
+        echo "$namespace|$pod|No resource requests defined" >> "$RECOMMENDATIONS_REPORT"
+        return
+      fi
+      
+      # Convert to base units
+      CPU_REQUEST_M=$(cpu_to_millicores "$CPU_REQUEST")
+      MEMORY_REQUEST_MI=$(memory_to_mi "$MEMORY_REQUEST")
+      
+      # Get actual usage from metrics
+      METRICS=$(kubectl top pod "$pod" -n "$namespace" 2>/dev/null || echo "")
+      
+      if [ -z "$METRICS" ]; then
+        echo "  ℹ️  No metrics available for $namespace/$pod (may be recently started)"
+        return
+      fi
+      
+      CPU_USAGE=$(echo "$METRICS" | tail -1 | awk '{print $2}' | sed 's/m$//')
+      MEMORY_USAGE=$(echo "$METRICS" | tail -1 | awk '{print $3}' | sed 's/Mi$//')
+      
+      # Handle empty values
+      CPU_USAGE=${CPU_USAGE:-0}
+      MEMORY_USAGE=${MEMORY_USAGE:-0}
+      
+      # Calculate usage percentages
+      if [ "$CPU_REQUEST_M" -gt 0 ]; then
+        CPU_USAGE_PERCENT=$((CPU_USAGE * 100 / CPU_REQUEST_M))
+      else
+        CPU_USAGE_PERCENT=0
+      fi
+      
+      if [ "$MEMORY_REQUEST_MI" -gt 0 ]; then
+        MEMORY_USAGE_PERCENT=$((MEMORY_USAGE * 100 / MEMORY_REQUEST_MI))
+      else
+        MEMORY_USAGE_PERCENT=0
+      fi
+      
+      # Check if pod is idle
+      if [ "$CPU_USAGE" -lt "$IDLE_CPU_THRESHOLD" ] && [ "$MEMORY_USAGE" -lt "$IDLE_MEMORY_THRESHOLD" ]; then
+        echo "  💤 IDLE: $namespace/$pod - CPU: ${CPU_USAGE}m, Memory: ${MEMORY_USAGE}Mi"
+        IDLE_PODS=$((IDLE_PODS + 1))
+        echo "$namespace|$pod|CPU:${CPU_USAGE}m|Memory:${MEMORY_USAGE}Mi|Idle resource - consider scaling down or removing" >> "$IDLE_REPORT"
+        return
+      fi
+      
+      # Check if pod is over-provisioned
+      if [ "$CPU_USAGE_PERCENT" -lt "$CPU_OVERPROVISIONED_THRESHOLD" ] || [ "$MEMORY_USAGE_PERCENT" -lt "$MEMORY_OVERPROVISIONED_THRESHOLD" ]; then
+        echo "  📊 OVER-PROVISIONED: $namespace/$pod"
+        echo "     CPU: ${CPU_USAGE}m / ${CPU_REQUEST_M}m (${CPU_USAGE_PERCENT}%)"
+        echo "     Memory: ${MEMORY_USAGE}Mi / ${MEMORY_REQUEST_MI}Mi (${MEMORY_USAGE_PERCENT}%)"
+        
+        OVERPROVISIONED_PODS=$((OVERPROVISIONED_PODS + 1))
+        
+        # Calculate recommended values (1.2x actual usage for safety buffer)
+        RECOMMENDED_CPU=$((CPU_USAGE * 120 / 100))
+        RECOMMENDED_MEMORY=$((MEMORY_USAGE * 120 / 100))
+        
+        # Ensure minimum values
+        [ "$RECOMMENDED_CPU" -lt 10 ] && RECOMMENDED_CPU=10
+        [ "$RECOMMENDED_MEMORY" -lt 64 ] && RECOMMENDED_MEMORY=64
+        
+        # Calculate potential savings
+        CPU_SAVING=$((CPU_REQUEST_M - RECOMMENDED_CPU))
+        MEMORY_SAVING=$((MEMORY_REQUEST_MI - RECOMMENDED_MEMORY))
+        
+        POTENTIAL_CPU_SAVINGS=$((POTENTIAL_CPU_SAVINGS + CPU_SAVING))
+        POTENTIAL_MEMORY_SAVINGS=$((POTENTIAL_MEMORY_SAVINGS + MEMORY_SAVING))
+        
+        echo "$namespace|$pod|CPU:${CPU_USAGE}m/${CPU_REQUEST_M}m(${CPU_USAGE_PERCENT}%)|Memory:${MEMORY_USAGE}Mi/${MEMORY_REQUEST_MI}Mi(${MEMORY_USAGE_PERCENT}%)|Recommend:CPU=${RECOMMENDED_CPU}m,Memory=${RECOMMENDED_MEMORY}Mi|Savings:CPU=${CPU_SAVING}m,Memory=${MEMORY_SAVING}Mi" >> "$OVERPROVISIONED_REPORT"
+      else
+        echo "  ✅ OPTIMIZED: $namespace/$pod - CPU: ${CPU_USAGE_PERCENT}%, Memory: ${MEMORY_USAGE_PERCENT}%"
+      fi
+    }
+    
+    echo "=== Analyzing Pods for Cost Optimization ==="
+    echo ""
+    
+    # Get all pods across all namespaces
+    PODS_JSON=$(kubectl get pods -A -o json 2>/dev/null)
+    
+    # Extract namespace and pod name
+    PODS=$(echo "$PODS_JSON" | jq -r '.items[] | "\(.metadata.namespace)|\(.metadata.name)"')
+    
+    if [ -z "$PODS" ]; then
+      echo "❌ No pods found"
+      exit 1
+    fi
+    
+    # Analyze each pod
+    while IFS='|' read -r namespace pod; do
+      if [ -n "$pod" ]; then
+        # Check if namespace should be excluded
+        SKIP=false
+        for EXCLUDE in $EXCLUDED_NAMESPACES; do
+          if [[ "$namespace" == *"$EXCLUDE"* ]]; then
+            SKIP=true
+            EXCLUDED_PODS=$((EXCLUDED_PODS + 1))
+            break
+          fi
+        done
+        
+        if [ "$SKIP" == "true" ]; then
+          echo "  ⏭️  Skipping system namespace pod: $namespace/$pod"
+          continue
+        fi
+        
+        analyze_pod "$namespace" "$pod"
+      fi
+    done <<< "$PODS"
+    
+    echo ""
+    echo "=========================================="
+    echo "Cost Optimization Analysis Complete"
+    echo "=========================================="
+    
+    # Generate summary
+    echo "" >> "$SUMMARY_REPORT"
+    echo "=== Cost Optimization Summary ===" >> "$SUMMARY_REPORT"
+    echo "Total Pods Analyzed: $TOTAL_PODS" >> "$SUMMARY_REPORT"
+    echo "Excluded System Pods: $EXCLUDED_PODS" >> "$SUMMARY_REPORT"
+    echo "Over-Provisioned Pods: $OVERPROVISIONED_PODS ($(( TOTAL_PODS > 0 ? OVERPROVISIONED_PODS * 100 / TOTAL_PODS : 0 ))%)" >> "$SUMMARY_REPORT"
+    echo "Idle Pods: $IDLE_PODS ($(( TOTAL_PODS > 0 ? IDLE_PODS * 100 / TOTAL_PODS : 0 ))%)" >> "$SUMMARY_REPORT"
+    echo "Pods Without Requests: $NO_REQUESTS_PODS" >> "$SUMMARY_REPORT"
+    echo "" >> "$SUMMARY_REPORT"
+    echo "Potential Savings:" >> "$SUMMARY_REPORT"
+    echo "  CPU: ${POTENTIAL_CPU_SAVINGS}m ($(echo "$POTENTIAL_CPU_SAVINGS" | awk '{printf "%.2f", $1/1000}') cores)" >> "$SUMMARY_REPORT"
+    echo "  Memory: ${POTENTIAL_MEMORY_SAVINGS}Mi ($(echo "$POTENTIAL_MEMORY_SAVINGS" | awk '{printf "%.2f", $1/1024}') Gi)" >> "$SUMMARY_REPORT"
+    echo "" >> "$SUMMARY_REPORT"
+    
+    # Display summary
+    cat "$SUMMARY_REPORT"
+    
+    # Display top over-provisioned pods
+    if [ -s "$OVERPROVISIONED_REPORT" ]; then
+      echo ""
+      echo "=== Top 10 Over-Provisioned Pods ==="
+      head -10 "$OVERPROVISIONED_REPORT" | while IFS='|' read -r ns pod cpu mem recommend savings; do
+        echo "📊 $ns/$pod"
+        echo "   Current: $cpu, $mem"
+        echo "   $recommend"
+        echo "   $savings"
+        echo ""
+      done
+    fi
+    
+    # Display idle pods
+    if [ -s "$IDLE_REPORT" ]; then
+      echo ""
+      echo "=== Idle Pods (Consider Removal) ==="
+      head -10 "$IDLE_REPORT" | while IFS='|' read -r ns pod cpu mem note; do
+        echo "💤 $ns/$pod - $cpu, $mem"
+        echo "   $note"
+      done
+    fi
+    
+    # Display pods without resource requests
+    if [ -s "$RECOMMENDATIONS_REPORT" ]; then
+      echo ""
+      echo "=== Pods Without Resource Requests ==="
+      head -10 "$RECOMMENDATIONS_REPORT" | while IFS='|' read -r ns pod note; do
+        echo "⚠️  $ns/$pod - $note"
+      done
+    fi
+    
+    # Send Teams notification with summary
+    if [ "$OVERPROVISIONED_PODS" -gt 0 ] || [ "$IDLE_PODS" -gt 0 ]; then
+      
+      # Build top recommendations
+      TOP_RECOMMENDATIONS=""
+      if [ -s "$OVERPROVISIONED_REPORT" ]; then
+        TOP_RECOMMENDATIONS="**Top Over-Provisioned:**  \\n"
+        TOP_RECOMMENDATIONS="${TOP_RECOMMENDATIONS}$(head -3 "$OVERPROVISIONED_REPORT" | while IFS='|' read -r ns pod cpu mem recommend savings; do
+          echo "- \`$ns/$pod\`: $recommend  \\n"
+        done)"
+      fi
+      
+      IDLE_LIST=""
+      if [ -s "$IDLE_REPORT" ]; then
+        IDLE_LIST="**Idle Pods:**  \\n"
+        IDLE_LIST="${IDLE_LIST}$(head -3 "$IDLE_REPORT" | while IFS='|' read -r ns pod cpu mem note; do
+          echo "- \`$ns/$pod\`: $cpu, $mem  \\n"
+        done)"
+      fi
+      
+      ALERT_MSG="💰 **Cost Optimization Opportunities Found**  \\n\\n**Summary:**  \\n- Total Pods: $TOTAL_PODS  \\n- Over-Provisioned: $OVERPROVISIONED_PODS pods  \\n- Idle: $IDLE_PODS pods  \\n- No Requests: $NO_REQUESTS_PODS pods  \\n\\n**Potential Savings:**  \\n- CPU: ${POTENTIAL_CPU_SAVINGS}m  \\n- Memory: ${POTENTIAL_MEMORY_SAVINGS}Mi  \\n\\n$TOP_RECOMMENDATIONS\\n$IDLE_LIST\\n⚠️ **Action:** Review and right-size resources to reduce costs."
+      send_teams_alert "💰 Cost Optimization Report" "$ALERT_MSG" "FFA500"
+    fi
+    
+    # Cleanup
+    rm -f "$OVERPROVISIONED_REPORT" "$IDLE_REPORT" "$RECOMMENDATIONS_REPORT" "$SUMMARY_REPORT"
+    
+    exit 0
+
+---
+# CronJob to run cost optimization analysis
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cost-optimization
+  namespace: gt-operators
+spec:
+  # Run daily at 6 AM
+  schedule: "0 6 * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 7200  # Keep job for 2 hours
+      template:
+        metadata:
+          labels:
+            app: cost-optimization
+        spec:
+          serviceAccountName: cost-optimization-sa
+{% if enable_registry_secret | default(false) %}
+          imagePullSecrets:
+            - name: regcred
+{% endif %}
+          restartPolicy: OnFailure
+          containers:
+            - name: optimizer
+              image: bitnami/kubectl:latest
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/bash"]
+              args: ["/scripts/optimize.sh"]
+              env:
+                # Mount Teams webhook from secret
+                - name: TEAMS_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: cost-teams-webhook
+                      key: webhook-url
+                # Set cluster name
+                - name: CLUSTER_NAME
+                  value: "gtocpmyntpoc01"
+              volumeMounts:
+                - name: optimizer-script
+                  mountPath: /scripts
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 1000m
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                runAsUser: 1001
+                capabilities:
+                  drop:
+                    - ALL
+          volumes:
+            - name: optimizer-script
+              configMap:
+                name: cost-optimization-script
+                defaultMode: 0755

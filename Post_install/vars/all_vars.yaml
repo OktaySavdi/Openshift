@@ -1,0 +1,430 @@
+---
+# OpenShift Post-Installation Configuration Variables
+# Single file containing all configuration options
+
+#################################
+# CLUSTER IDENTIFICATION
+#################################
+cluster_name: "myocptestcluster"
+base_domain: "mydomain.com"
+
+#################################
+# INFRASTRUCTURE CONFIGURATION
+#################################
+
+# Enable infrastructure node configuration
+# Set to true ONLY if you want dedicated infrastructure nodes
+# When enabled:
+#   1. Creates dedicated MachineConfigPool for infra nodes
+#   2. Applies custom kubelet configuration for infra nodes
+#   3. Schedules infra workloads (ingress, registry, monitoring, logging) on infra nodes
+enable_infra: false
+
+# Infrastructure Node List (required if enable_infra: true)
+# Specify which nodes should be designated as infrastructure nodes
+# These nodes will be labeled with node-role.kubernetes.io/infra
+# Example: infra_nodes: ["worker-01", "worker-02"]
+infra_nodes: []
+
+# Infrastructure node selector (used to identify infra nodes)
+infra_node_selector: "node-role.kubernetes.io/infra"
+
+# Advanced Infrastructure Settings (optional)
+# Maximum number of infra nodes that can be unavailable during updates
+infra_max_unavailable: 1  # Uncomment to set (default: 1)
+
+# Auto-scale ingress replicas based on number of infra nodes
+# infra_replicas_auto_scale: true  # Default: true
+
+# Individual component scheduling control (only applies if enable_infra: true)
+# Set to false to disable specific components from being scheduled on infra nodes
+schedule_ingress_on_infra: true
+schedule_registry_on_infra: true
+schedule_monitoring_on_infra: true
+schedule_logging_on_infra: true
+
+# Machine labeling configuration for baremetal nodes
+# Note: For baremetal, nodes are pre-existing and only need proper labeling
+enable_machine_labeling: true
+node_labeling_config:
+  - node_selector: "node-role.kubernetes.io/master"
+    labels:
+      - key: "node-type"
+        value: "master"
+  - node_selector: "node-role.kubernetes.io/worker"  
+    labels:
+      - key: "node-type"
+        value: "worker"
+  - node_selector: "comp-infra=true"
+    labels:
+      - key: "node-role.kubernetes.io/infra"
+        value: ""
+
+#################################
+# NETWORK CONFIGURATION
+#################################
+# Egress IP Configuration for OVN-Kubernetes
+enable_egress_ip: true
+
+# All worker nodes will be automatically labeled with k8s.ovn.org/egress-assignable
+# Static IPs that will be used for egress traffic from selected namespaces/pods
+egress_ips:
+  - "192.0.2.200"
+
+# Namespace selector to determine which namespaces use egress IPs
+egress_namespace_selector:
+  matchLabels:
+    egress: "restricted"
+
+# Optional: Name for the EgressIP resource (default: cluster-egress)
+# egress_name: "my-egress-config"
+
+# Optional: Configure specific pod selector (uncomment and modify as needed)
+# egress_pod_selector:
+#   matchLabels:
+#     app: "my-app"
+
+#################################
+# STORAGE CONFIGURATION
+#################################
+
+# Image Registry Storage Configuration
+enable_registry_storage: false
+registry_storage_type: "nfs"  # Options: "nfs" or "pvc"
+registry_pvc_name: "image-registry-storage"
+registry_storage_size: "100Gi"
+
+# NFS settings (used when registry_storage_type is "nfs")
+nfs_server: "nfs.example.com"
+registry_nfs_path: "/exports/registry"
+
+# Storage class (used when registry_storage_type is "pvc")
+registry_storage_class: ""  # Leave empty for default storage class
+# registry_storage_class: "nfs-client"  # Example storage class
+
+#################################
+# Certificate Management Configuration
+#################################
+# Enables cert-manager operator and API/Ingress certificate configuration
+enable_certificates: true
+
+#################################
+# LDAP CONFIGURATION
+#################################
+enable_ldap: true
+ldap_password: "{{ vault_ldap_password }}"
+ldap_ca_crt: "certs/ldap.crt"
+ldap_secret_name: "ldap-secret"
+ldap_ca_configmap_name: "ca-config-ldap"
+ldap_provider_name: "ldap"
+ldap_mapping_method: "claim"
+ldap_bind_dn: "CN=xxxx,OU=xxx,OU=xxx,DC=xxxx,DC=xxx"
+ldap_url: "ldaps://xxxxx.xxxx:636/OU=xxxxx,OU=xxxx,DC=xxxx"
+ldap_admin_url: "ldaps://xxxxx.xxxx:636/OU=xxxxx,OU=xxxx,DC=xxxx"
+ldap_attributes:
+  id:
+    - "sAMAccountName"
+  email:
+    - "mail"
+  name:
+    - "cn"
+  preferred_username:
+    - "sAMAccountName"
+
+# LDAP Group Sync Configuration
+enable_ldap_group_sync: false
+
+ldap_sync_server_url: "ldaps://xxxxxxx:636"
+ldap_sync_ca_bundle: "cert/ca-bundle.crt"
+ldap_sync_groups_base_dn: "OU=x,OU=xxxx,DC=xxxx,DC=xxx"
+ldap_sync_users_base_dn: "OU=xxxx,DC=xxxx,DC=xxx"
+ldap_sync_filter: (&(objectClass=group)(cn=OpenShift*))
+ldap_sync_group_uid_attribute: "dn"
+ldap_sync_group_name_attributes:
+  - "cn"
+ldap_sync_group_membership_attributes:
+  - "member"
+ldap_sync_user_uid_attribute: "dn"
+ldap_sync_user_name_attributes:
+  - "sAMAccountName"
+
+# Group Sync Schedule (cron format)
+ldap_sync_schedule: "0 */6 * * *"
+
+# Optional: Specific groups to sync (leave empty to sync all)
+ldap_group_whitelist: []
+# Example:
+# ldap_group_whitelist:
+#   - "openshift-admins"
+#   - "developers"
+#   - "qa-team"
+
+#################################
+# CLUSTER UPGRADE CONFIGURATION
+#################################
+enable_upgrade_optimization: true
+
+# Machine Config Pool maxUnavailable settings for rolling upgrades
+# Controls how many nodes can be upgraded simultaneously
+worker_max_unavailable: 2
+master_max_unavailable: 1
+
+# Cluster Update Channel Configuration
+# Options: stable-4.x, fast-4.x, eus-4.x, candidate-4.x
+# stable: General availability releases (recommended for production)
+# fast: Early access to upcoming stable releases
+# eus: Extended Update Support for long-term stability (e.g., 4.14, 4.16)
+# candidate: Pre-release versions for testing
+enable_update_channel: true
+update_channel: "stable-4.19"  # Set your desired OpenShift version
+
+# Update service upstream URL
+update_service_upstream: "https://api.openshift.com/api/upgrades_info/v1/graph"
+
+#################################
+# PROXY CONFIGURATION
+#################################
+enable_cluster_proxy: false
+
+# Proxy server settings (configure only if using proxy)
+# proxy_http_url: "http://username:password@proxy.company.com:8080"
+# proxy_https_url: "http://username:password@proxy.company.com:8080"
+
+# No proxy list - internal networks and services that should bypass proxy
+# proxy_no_proxy_list:
+#   - "localhost"
+#   - "oc.local"
+#   - "192.0.2.1"
+#   - "192.0.2.2"
+#   - "192.0.2.3"
+#   - "192.0.2.4"
+#   - "192.0.2.5"
+#   - "192.0.2.6"
+#   - ".cluster.local"
+#   - ".svc"
+#   - "127.0.0.1"
+
+#################################
+# IMAGE PRUNING CONFIGURATION
+#################################
+enable_image_pruning: true
+
+# Image pruner job settings
+image_pruner_failed_jobs_limit: 3
+image_pruner_successful_jobs_limit: 3
+image_pruner_ignore_invalid_refs: true
+image_pruner_log_level: "Normal"
+image_pruner_suspend: false
+
+# Pruning schedule and retention settings
+image_pruner_schedule: "0 17 * * *"  # Daily at 5 PM
+image_pruner_keep_tag_revisions: 3
+image_pruner_keep_younger_than: 60    # Hours
+
+#################################
+# CONSOLE/DEVELOPER PORTAL SETTINGS
+#################################
+enable_dev_portal: true
+
+#################################
+# NTP/CHRONY CONFIGURATION
+#################################
+enable_chrony: true
+ntp_server_host: "ntpserve.domain.com"
+# Optional fallback NTP servers
+ntp_fallback_servers: []
+# Example:
+# ntp_fallback_servers:
+#   - "pool.ntp.org"
+#   - "time.cloudflare.com"
+
+#################################
+# SSH AUTHORIZED KEYS CONFIGURATION
+#################################
+enable_ssh_keys: true
+# SSH public key is stored in vault.yml as vault_ssh_public_key
+
+#################################
+# SECURITY SETTINGS
+#################################
+# When enabled, prevents regular users from creating new projects
+disable_self_provisioning: true
+
+#################################
+# LOGGING CONFIGURATION
+#################################
+# Enable log forwarding to external endpoint
+enable_log_forwarding: true
+
+# Log forwarding endpoint
+log_forwarding_url: "http://192.0.2.10:9090"
+
+# HAProxy access logging (Ingress Controller)
+enable_haproxy_logging: true
+
+#################################
+# OPERATORS CONFIGURATION
+#################################
+# gt-operators namespace - for custom operators and monitoring tools
+enable_gt_operators: true
+
+# Teams webhook for notifications (used by operators)
+teams_webhook_url: "{{ vault_teams_webhook_url }}"
+
+# ServiceNow integration configuration
+servicenow_instance: "{{ vault_servicenow_instance }}"
+servicenow_user: "{{ vault_servicenow_user }}"
+servicenow_password: "{{ vault_servicenow_password }}"
+servicenow_assignment_group: "Platform_Team"
+servicenow_category: "Kubernetes"
+servicenow_subcategory: "Operations"
+
+# Enable/disable specific operators
+enable_pod_cleanup: true
+enable_cert_expiry_monitor: true
+enable_etcd_backup: true
+enable_cluster_intelligence: true
+enable_cost_optimization: true
+enable_namespace_quota_monitor: true
+enable_node_resource_monitor: true
+enable_pvc_storage_monitor: true
+
+# Private Docker Registry Configuration
+# Enable if operators need to pull images from private registry
+enable_registry_secret: true
+docker_registry_url: "docker.io"  # Registry URL (e.g., quay.io, docker.io, ghcr.io)
+docker_registry_email: "myemail@mydoamin.com"  # Optional email
+# Credentials are stored in vault.yml:
+# vault_docker_username: "your-username"
+# vault_docker_password: "your-password"
+
+#################################
+# RBAC CONFIGURATION
+#################################
+# LDAP Groups for Cluster Admin access
+# These groups will get cluster-admin role (full cluster access)
+cluster_admin_groups:
+  - "xxxxxxxx"
+  # Add more groups as needed:
+  # - "OpenShift-Admin-Group"
+  # - "Platform-Engineering-Team"
+
+# LDAP Groups for GTOps role access
+# These groups will get gtops-role (developer + operator permissions)
+gtops_additional_groups:
+  # - "OpenShift-Developers-Grouo"
+  # - "DevOps-Team"
+  # Add groups as needed
+
+# Note: The default gtops-binding already binds "gtops-rb" group to gtops-role
+
+#################################
+# KUBELET CONFIGURATION
+#################################
+# System Reserved Resources (optional)
+# Uncomment and set kubelet_system_reserved: "yes" to enable
+kubelet_system_reserved: "yes"
+kubelet_reserved_cpu_worker: "500m"
+kubelet_reserved_memory_worker: "1Gi"
+
+# Maximum Pods per Node (optional, for custom configurations)
+kubelet_max_pods: 250
+
+#################################
+# KDUMP CONFIGURATION
+#################################
+# Enable kdump for kernel crash dumps
+# kdump captures memory dumps when kernel crashes for debugging
+enable_kdump: true
+
+# Kdump crash kernel memory reservation
+# Adjust based on total system memory (recommended: 256M-512M)
+kdump_crash_kernel_memory: "256M"
+
+# Apply kdump to specific node pools
+# Options: "master", "worker", "all"
+kdump_target_pools:
+  - "master"
+  - "worker"
+
+# Optional: Custom kdump configuration
+kdump_path: "/var/crash"  # Path to store crash dumps (default: /var/crash)
+kdump_disk_quota: "4096"  # Maximum disk space for dumps in MB (default: 2048MB = 2GB)
+                          # Prevents crash dumps from consuming all disk space
+                          # Older dumps automatically removed when quota exceeded
+# kdump_default_action: "reboot"  # Action after dump: "reboot" (default, HA clusters) or "poweroff" (manual investigation)
+
+#################################
+# PERFORMANCE TUNING CONFIGURATION
+#################################
+# Apply performance tuning profiles to optimize node performance
+# All tuning values are hardcoded in template files:
+# - templates/configs/machine-configs/infra-network-latency-tuned.yaml (for infra nodes)
+# - templates/configs/machine-configs/worker-throughput-tuned.yaml (for worker nodes)
+
+# Enable performance tuning for infra nodes (recommended for production)
+# Optimizes network latency for HAProxy/Router workloads
+enable_infra_tuning: true
+
+# Enable performance tuning for worker nodes (optional)
+# Set to true only if you have specific high-throughput requirements
+enable_worker_tuning: false
+
+#################################
+# OPENCOST CONFIGURATION
+#################################
+# Deploy OpenCost for cluster cost analysis and optimization
+# Provides cost breakdown by namespace, pod, and deployment
+
+# Enable OpenCost deployment
+enable_opencost: true
+
+# Azure billing integration (optional)
+# Set to true to integrate with Azure billing API for accurate cost data (requires Azure Cost Management Reader role)
+enable_opencost_azure: true
+
+# Azure API key for cost data (store in vault.yml if enabled)
+# opencost_azure_api_key: "{{ vault_opencost_azure_api_key }}"
+
+# Cost analysis settings
+opencost_excluded_namespaces: "openshift-*,kube-*,default"  # Exclude system namespaces from cost calculations
+
+#################################
+# COMPLIANCE & SECURITY CONFIGURATION
+#################################
+
+# Compliance Operator for CIS/PCI-DSS scanning
+enable_compliance_operator: true
+
+# CIS Benchmark scanning (recommended for production)
+enable_cis_scanning: true
+cis_scan_schedule: "0 2 * * 0"  # Weekly on Sunday at 2 AM
+
+# PCI-DSS compliance scanning
+enable_pci_dss_scanning: false
+pci_dss_scan_schedule: "0 3 * * 0"  # Weekly on Sunday at 3 AM
+
+# Auto-apply compliance remediations (set to false for manual review)
+compliance_auto_apply_remediations: false
+compliance_auto_update_remediations: true
+
+# Falco Runtime Security
+enable_falco: true
+
+# Falco configuration
+falco_ebpf_enabled: true
+falco_driver_kind: "modern_ebpf"  # Options: ebpf, modern_ebpf, module
+falco_sidekick_enabled: true
+falco_webui_enabled: true
+
+# Falco alert priorities to forward (minimum priority)
+falco_minimum_priority: "warning"  # Options: emergency, alert, critical, error, warning, notice, informational, debug
+
+# OPA Gatekeeper for Policy Enforcement
+enable_gatekeeper: true
+
+# Gatekeeper audit interval (how often to check existing resources)
+gatekeeper_audit_interval: "60"  # seconds
+
+# Enable Gatekeeper mutation (allows policies to modify resources)
+gatekeeper_mutation_enabled: false
