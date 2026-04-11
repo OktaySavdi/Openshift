@@ -1,0 +1,9 @@
+# Global configuration for all OpenShift clusters
+---
+# Cluster configuration
+cluster_domain: "{{ cluster_name }}"
+short_cluster_name: "{{ cluster_name.split('.')[0] }}"
+
+# Paths and directories
+kubeconfig_path: "{{ lookup('env', 'KUBECONFIG') | default(ansible_env.HOME + '/.kube/config', true) }}"
+templates_dir: "{{ playbook_dir }}/templates"
